@@ -133,7 +133,6 @@ pub struct Game {
     hand_number: u32,
     community_count: u8,
     pending_scores: Vec<(PlayerId, HandScore)>,
-    pending_bb_player: Option<PlayerId>,
 }
 
 impl Game {
@@ -161,11 +160,14 @@ impl Game {
             hand_number: 0,
             community_count: 0,
             pending_scores: Vec::new(),
-            pending_bb_player: None,
         }
     }
 
     /// Add a player to the table. Can only be done between hands.
+    ///
+    /// The new player is inserted at a position in the seat order so that:
+    /// - With 2 players (heads-up → 3): new player gets small blind.
+    /// - With 3+ players: new player gets big blind.
     ///
     /// # Errors
     ///
@@ -184,9 +186,26 @@ impl Game {
                 max: self.config.max_players,
             });
         }
-        self.players
-            .push(PlayerState::new(player_id, self.config.starting_chips));
-        self.pending_bb_player = Some(player_id);
+
+        let n = self.players.len();
+        let new_player = PlayerState::new(player_id, self.config.starting_chips);
+
+        if n < 2 {
+            self.players.push(new_player);
+        } else {
+            let d = self.dealer_index;
+            let insert_at = if n == 2 {
+                d
+            } else {
+                let p = (d + 4) % (n + 1);
+                if p <= d { p } else { (d + 3) % (n + 1) }
+            };
+            self.players.insert(insert_at, new_player);
+            if insert_at <= d {
+                self.dealer_index += 1;
+            }
+        }
+
         Ok(())
     }
 
@@ -326,17 +345,7 @@ impl Game {
             return Err(PokerError::CannotStartHand);
         }
 
-        if let Some(bb_player_id) = self.pending_bb_player.take() {
-            if let Some(bb_pos) = eligible_indices.iter().position(|&i| self.players[i].id == bb_player_id) {
-                let len = eligible_indices.len();
-                let dealer_pos = (bb_pos + len - 2) % len;
-                self.dealer_index = eligible_indices[dealer_pos];
-            } else {
-                self.rotate_dealer(&eligible_indices);
-            }
-        } else {
-            self.rotate_dealer(&eligible_indices);
-        }
+        self.rotate_dealer(&eligible_indices);
         self.players[self.dealer_index].is_dealer = true;
 
         let dealer_pos = eligible_indices.iter().position(|&i| i == self.dealer_index).unwrap();
@@ -963,7 +972,8 @@ mod tests {
         let mut game = setup_three_player_game();
         game.start_hand().unwrap();
         let dealer_id = game.all_players().iter().find(|p| p.is_dealer).unwrap().id;
-        assert_eq!(dealer_id, 1);
+        // With new insertion order [P3, P1, P2], hand 1 dealer is P3
+        assert_eq!(dealer_id, 3);
 
         for _ in 0..3 {
             game.handle_event(GameEvent::HoleCardsDealt {
@@ -1024,7 +1034,8 @@ mod tests {
 
         game.start_hand().unwrap();
         let dealer_id = game.all_players().iter().find(|p| p.is_dealer).unwrap().id;
-        assert_eq!(dealer_id, 2);
+        // Hand 2: rotation from P3 → next is P1
+        assert_eq!(dealer_id, 1);
     }
 
     // === Betting action tests ===
@@ -1498,10 +1509,10 @@ mod tests {
         assert_eq!(game.phase(), GamePhase::Flop);
     }
 
-    // === New player on big blind ===
+    // === New player position ===
 
     #[test]
-    fn test_new_player_gets_big_blind() {
+    fn test_new_player_sb_in_heads_up() {
         let mut game = setup_two_player_game();
 
         // Play first hand to completion
@@ -1512,35 +1523,48 @@ mod tests {
         game.player_action(active, PlayerAction::Fold).unwrap();
         assert_eq!(game.phase(), GamePhase::GameOver);
 
-        // Add a third player
+        // Add third player — n=2→3, new player gets SB
         game.add_player(3).unwrap();
 
-        // Start next hand — player 3 should be BB
         game.start_hand().unwrap();
 
         let p3 = game.all_players().iter().find(|p| p.id == 3).unwrap();
-        assert_eq!(p3.bet, game.config().big_blind, "player 3 should post big blind");
+        assert_eq!(p3.bet, game.config().small_blind, "player 3 should post small blind");
 
-        let dealer = game.all_players().iter().find(|p| p.is_dealer).unwrap();
-        let sb = game
-            .all_players()
-            .iter()
-            .find(|p| p.bet == game.config().small_blind)
-            .unwrap();
         let bb = game
             .all_players()
             .iter()
-            .find(|p| p.bet == game.config().big_blind && p.id != sb.id)
+            .find(|p| p.bet == game.config().big_blind)
             .unwrap();
-
-        assert_ne!(dealer.id, bb.id, "dealer and BB should be different players");
-        assert_ne!(dealer.id, sb.id, "dealer and SB should be different players");
-        assert_ne!(sb.id, bb.id, "SB and BB should be different players");
-        assert_eq!(bb.id, 3, "player 3 should be big blind");
+        assert_ne!(bb.id, 3, "player 3 should not be BB");
     }
 
     #[test]
-    fn test_new_player_bb_normal_rotation_after() {
+    fn test_new_player_bb_with_three_players() {
+        let mut game = setup_three_player_game();
+
+        // Play first hand to completion
+        game.start_hand().unwrap();
+        game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
+        game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+        game.handle_event(GameEvent::HoleCardsDealt { player_id: 3 }).unwrap();
+        let active = game.active_player().unwrap();
+        game.player_action(active, PlayerAction::Fold).unwrap();
+        let active2 = game.active_player().unwrap();
+        game.player_action(active2, PlayerAction::Fold).unwrap();
+        assert_eq!(game.phase(), GamePhase::GameOver);
+
+        // Add fourth player — n=3→4, new player gets BB
+        game.add_player(4).unwrap();
+
+        game.start_hand().unwrap();
+
+        let p4 = game.all_players().iter().find(|p| p.id == 4).unwrap();
+        assert_eq!(p4.bet, game.config().big_blind, "player 4 should post big blind");
+    }
+
+    #[test]
+    fn test_normal_rotation_after_new_player() {
         let mut game = setup_two_player_game();
 
         // Play hand 1
@@ -1550,17 +1574,17 @@ mod tests {
         let active = game.active_player().unwrap();
         game.player_action(active, PlayerAction::Fold).unwrap();
 
-        // Add player 3
+        // Add player 3 — gets SB
         game.add_player(3).unwrap();
 
-        // Hand 2 — player 3 on BB
+        // Hand 2 — player 3 is SB
         game.start_hand().unwrap();
-        let bb = game
+        let sb = game
             .all_players()
             .iter()
-            .find(|p| p.bet == game.config().big_blind && p.bet > 0)
+            .find(|p| p.bet == game.config().small_blind)
             .unwrap();
-        assert_eq!(bb.id, 3);
+        assert_eq!(sb.id, 3, "player 3 should be SB");
 
         // Play to completion
         game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
@@ -1572,13 +1596,9 @@ mod tests {
         game.player_action(a2, PlayerAction::Fold).unwrap();
         assert_eq!(game.phase(), GamePhase::GameOver);
 
-        // Hand 3 — normal rotation, no pending BB
+        // Hand 3 — normal rotation
         game.start_hand().unwrap();
-        let bb3 = game
-            .all_players()
-            .iter()
-            .find(|p| p.bet == game.config().big_blind && p.bet > 0)
-            .unwrap();
-        assert_ne!(bb3.id, 3, "player 3 should not be BB again in normal rotation");
+        let total_bets: u64 = game.all_players().iter().map(|p| p.bet).sum();
+        assert_eq!(total_bets, game.config().small_blind + game.config().big_blind);
     }
 }
