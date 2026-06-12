@@ -1,22 +1,45 @@
 use std::collections::HashSet;
 use crate::error::PlayerId;
 
+/// A single layer of the pot, tracking which players are eligible.
 #[derive(Debug, Clone)]
 pub struct PotLayer {
+    /// Amount in this pot layer.
     pub amount: u64,
+    /// Players eligible to win this layer.
     pub eligible: HashSet<PlayerId>,
 }
 
+/// Poker pot with support for side pots.
+///
+/// # Examples
+///
+/// ```rust
+/// use poker_engine::Pot;
+///
+/// let mut pot = Pot::default();
+/// pot.add_bet(1, 100);
+/// pot.add_bet(2, 200);
+/// pot.add_bet(3, 300);
+/// assert_eq!(pot.total(), 600);
+///
+/// let payouts = pot.distribute(&[3]);
+/// assert_eq!(payouts.len(), 1);
+/// assert_eq!(payouts[0], (3, 600));
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct Pot {
+    /// Layers of the pot (main pot + side pots).
     pub layers: Vec<PotLayer>,
 }
 
 impl Pot {
+    /// Total amount across all pot layers.
     pub fn total(&self) -> u64 {
         self.layers.iter().map(|l| l.amount).sum()
     }
 
+    /// Add a bet from a player to the current pot.
     pub fn add_bet(&mut self, player_id: PlayerId, amount: u64) {
         if self.layers.is_empty() {
             self.layers.push(PotLayer {
@@ -33,6 +56,8 @@ impl Pot {
         }
     }
 
+    /// Rebuild pot layers from a list of (player_id, total_bet) pairs.
+    /// Automatically creates side pots when bets are unequal.
     pub fn collect_from_bets(&mut self, bets: &[(PlayerId, u64)]) {
         let mut sorted: Vec<(PlayerId, u64)> = bets
             .iter()
@@ -68,6 +93,10 @@ impl Pot {
         self.layers = layers;
     }
 
+    /// Distribute pot layers to winners. Returns a list of (player_id, amount) payouts.
+    ///
+    /// For each layer, if any winners are eligible, the layer is split among them.
+    /// If no winners are eligible, the layer goes to the first eligible player.
     pub fn distribute(&self, winners: &[PlayerId]) -> Vec<(PlayerId, u64)> {
         let mut payouts: Vec<(PlayerId, u64)> = Vec::new();
 

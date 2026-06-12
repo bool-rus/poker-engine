@@ -1,24 +1,83 @@
 use std::fmt;
 
+/// Unique identifier for a player at the table.
 pub type PlayerId = u64;
 
+/// Errors that can occur during game operations.
+///
+/// # Examples
+///
+/// ```rust
+/// use poker_engine::{Game, GameConfig, PokerError};
+///
+/// let config = GameConfig { max_players: 2, ..GameConfig::default() };
+/// let mut game = Game::new(config);
+/// game.add_player(1).unwrap();
+/// game.add_player(2).unwrap();
+/// assert_eq!(game.add_player(3), Err(PokerError::TableFull { max: 2 }));
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PokerError {
+    /// The requested action is not valid in the current game state.
     InvalidAction(String),
+    /// The specified player was not found at the table.
     PlayerNotFound(PlayerId),
+    /// A player with this ID is already at the table.
     PlayerAlreadyAtTable(PlayerId),
+    /// The player is not in the current hand.
     PlayerNotInHand(PlayerId),
-    NotYourTurn { expected: PlayerId, got: PlayerId },
+    /// It is not this player's turn to act.
+    NotYourTurn {
+        /// The player whose turn it is.
+        expected: PlayerId,
+        /// The player who attempted to act.
+        got: PlayerId,
+    },
+    /// Cannot modify the table while a hand is in progress.
     GameInProgress,
-    NotEnoughPlayers { required: usize, current: usize },
-    TableFull { max: usize },
-    NotEnoughChips { player: PlayerId, available: u64, required: u64 },
-    RaiseBelowMinimum { minimum: u64, attempted: u64 },
+    /// Not enough players to start a hand.
+    NotEnoughPlayers {
+        /// Minimum required players.
+        required: usize,
+        /// Current number of eligible players.
+        current: usize,
+    },
+    /// The table has reached its maximum capacity.
+    TableFull {
+        /// Maximum number of players.
+        max: usize,
+    },
+    /// The player does not have enough chips for the requested action.
+    NotEnoughChips {
+        /// The player's ID.
+        player: PlayerId,
+        /// Available chips.
+        available: u64,
+        /// Required chips.
+        required: u64,
+    },
+    /// A raise is below the minimum allowed amount.
+    RaiseBelowMinimum {
+        /// Minimum raise amount.
+        minimum: u64,
+        /// Attempted raise amount.
+        attempted: u64,
+    },
+    /// No hand is currently in progress.
     GameNotInProgress,
+    /// Cannot start a new hand (not enough eligible players).
     CannotStartHand,
+    /// The player is all-in and cannot act further.
     PlayerIsAllIn(PlayerId),
+    /// The player is sitting out and cannot participate.
     PlayerSittingOut(PlayerId),
-    InvalidRebuy { player: PlayerId, amount: u64 },
+    /// The rebuy amount is invalid.
+    InvalidRebuy {
+        /// The player's ID.
+        player: PlayerId,
+        /// Attempted rebuy amount.
+        amount: u64,
+    },
 }
 
 impl fmt::Display for PokerError {

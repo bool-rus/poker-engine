@@ -5,25 +5,67 @@ use crate::command::{GameCommand, PlayerAction};
 use crate::event::GameEvent;
 use crate::pot::Pot;
 
+/// Phases of a single poker hand.
+///
+/// # Examples
+///
+/// ```rust
+/// use poker_engine::{Game, GameConfig, GamePhase};
+///
+/// let mut game = Game::new(GameConfig::default());
+/// assert_eq!(game.phase(), GamePhase::WaitingToStart);
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GamePhase {
+    /// Waiting for the hand to start.
     WaitingToStart,
+    /// Pre-flop betting round.
     PreFlop,
+    /// Flop betting round (3 community cards revealed).
     Flop,
+    /// Turn betting round (4th community card revealed).
     Turn,
+    /// River betting round (5th community card revealed).
     River,
+    /// Showdown — players reveal cards.
     Showdown,
+    /// Hand is over, waiting for the next one.
     GameOver,
 }
 
+/// Configuration for a poker game.
+///
+/// # Examples
+///
+/// ```rust
+/// use poker_engine::GameConfig;
+///
+/// let config = GameConfig {
+///     small_blind: 25,
+///     big_blind: 50,
+///     starting_chips: 5000,
+///     max_players: 6,
+///     min_players: 2,
+///     allow_rebuy: true,
+///     rebuy_amount: Some(5000),
+/// };
+/// assert_eq!(config.big_blind, 50);
+/// ```
 #[derive(Debug, Clone)]
 pub struct GameConfig {
+    /// Small blind amount.
     pub small_blind: u64,
+    /// Big blind amount.
     pub big_blind: u64,
+    /// Starting chips for each player.
     pub starting_chips: u64,
+    /// Maximum number of players at the table.
     pub max_players: usize,
+    /// Minimum number of players to start a hand.
     pub min_players: usize,
+    /// Whether rebuys are allowed.
     pub allow_rebuy: bool,
+    /// Maximum rebuy amount (None = starting_chips).
     pub rebuy_amount: Option<u64>,
 }
 
@@ -41,6 +83,42 @@ impl Default for GameConfig {
     }
 }
 
+/// Texas Hold'em poker engine.
+///
+/// Manages game state, betting rounds, pot distribution, and player actions.
+/// Card values are not known to the engine — it communicates with an external
+/// dealer via [`GameCommand`] / [`GameEvent`] messages.
+///
+/// # Game flow
+///
+/// ```text
+/// add_player() → start_hand() → player_action() → ... → GameOver → start_hand()
+///                  │                   │
+///                  ▼                   ▼
+///            [GameCommand]       [GameCommand]
+///            [GameEvent]         [GameEvent]
+/// ```
+///
+/// # Examples
+///
+/// ```rust
+/// use poker_engine::{Game, GameConfig, PlayerAction, GameEvent};
+///
+/// let mut game = Game::new(GameConfig::default());
+/// game.add_player(1).unwrap();
+/// game.add_player(2).unwrap();
+///
+/// // Start hand — get commands for dealer
+/// let cmds = game.start_hand().unwrap();
+///
+/// // Feed dealer results back
+/// game.handle_event(GameEvent::HoleCardsDealt { player_id: 1, score: 100 }).unwrap();
+/// game.handle_event(GameEvent::HoleCardsDealt { player_id: 2, score: 200 }).unwrap();
+///
+/// // Player actions
+/// let active = game.active_player().unwrap();
+/// game.player_action(active, PlayerAction::Call).unwrap();
+/// ```
 #[derive(Debug, Clone)]
 pub struct Game {
     config: GameConfig,
@@ -57,6 +135,16 @@ pub struct Game {
 }
 
 impl Game {
+    /// Create a new game with the given configuration.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use poker_engine::{Game, GameConfig, GamePhase};
+    ///
+    /// let game = Game::new(GameConfig::default());
+    /// assert_eq!(game.phase(), GamePhase::WaitingToStart);
+    /// ```
     pub fn new(config: GameConfig) -> Self {
         Self {
             config,
@@ -73,6 +161,13 @@ impl Game {
         }
     }
 
+    /// Add a player to the table. Can only be done between hands.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PokerError::GameInProgress`] if a hand is in progress.
+    /// Returns [`PokerError::PlayerAlreadyAtTable`] if the player is already seated.
+    /// Returns [`PokerError::TableFull`] if the table is at capacity.
     pub fn add_player(&mut self, player_id: PlayerId) -> Result<(), PokerError> {
         if self.phase != GamePhase::WaitingToStart && self.phase != GamePhase::GameOver {
             return Err(PokerError::GameInProgress);
@@ -90,6 +185,7 @@ impl Game {
         Ok(())
     }
 
+    /// Remove a player from the table. Can only be done between hands.
     pub fn remove_player(&mut self, player_id: PlayerId) -> Result<(), PokerError> {
         if self.phase != GamePhase::WaitingToStart && self.phase != GamePhase::GameOver {
             return Err(PokerError::GameInProgress);
@@ -103,6 +199,7 @@ impl Game {
         Ok(())
     }
 
+    /// Set a player to sit out. They will auto-fold each hand until sit_in is called.
     pub fn sit_out(&mut self, player_id: PlayerId) -> Result<(), PokerError> {
         let player = self
             .players
@@ -116,6 +213,7 @@ impl Game {
         Ok(())
     }
 
+    /// Set a player to sit back in. They will rejoin at the start of the next hand.
     pub fn sit_in(&mut self, player_id: PlayerId) -> Result<(), PokerError> {
         let player = self
             .players
@@ -128,6 +226,7 @@ impl Game {
         Ok(())
     }
 
+    /// Add chips to a player's stack (rebuy).
     pub fn rebuy(&mut self, player_id: PlayerId, amount: u64) -> Result<(), PokerError> {
         if !self.config.allow_rebuy {
             return Err(PokerError::InvalidAction(
@@ -155,6 +254,7 @@ impl Game {
         Ok(())
     }
 
+    /// Returns `true` if there are enough eligible players to start a hand.
     pub fn can_start_hand(&self) -> bool {
         let eligible = self
             .players
@@ -164,6 +264,14 @@ impl Game {
         eligible >= self.config.min_players
     }
 
+    /// Start a new hand. Posts blinds, deals cards, and returns commands for the dealer.
+    ///
+    /// The returned [`GameCommand`] list tells the dealer which cards to deal.
+    /// After dealing, feed the results back via [`handle_event`](Self::handle_event).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PokerError::CannotStartHand`] if not enough eligible players.
     pub fn start_hand(&mut self) -> Result<Vec<GameCommand>, PokerError> {
         for player in &mut self.players {
             if player.status == PlayerStatus::SittingOut && player.wants_in {
@@ -262,6 +370,9 @@ impl Game {
         Ok(commands)
     }
 
+    /// Process a dealer event. Updates hand scores and may trigger phase transitions.
+    ///
+    /// Returns additional commands if the engine needs more dealer actions.
     pub fn handle_event(&mut self, event: GameEvent) -> Result<Vec<GameCommand>, PokerError> {
         match event {
             GameEvent::HoleCardsDealt { player_id, score } => {
@@ -292,6 +403,14 @@ impl Game {
         }
     }
 
+    /// Execute a player action (fold, check, call, raise, all-in).
+    ///
+    /// Returns commands if the action triggers a phase transition (e.g., revealing community cards).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PokerError::NotYourTurn`] if it is not this player's turn.
+    /// Returns [`PokerError::PlayerIsAllIn`] if the player is all-in.
     pub fn player_action(
         &mut self,
         player_id: PlayerId,
@@ -585,14 +704,17 @@ impl Game {
             .or_else(|| eligible.first().copied())
     }
 
+    /// Current game phase.
     pub fn phase(&self) -> GamePhase {
         self.phase
     }
 
+    /// ID of the player who should act next, or None if no one is acting.
     pub fn active_player(&self) -> Option<PlayerId> {
         self.acting_index.map(|i| self.players[i].id)
     }
 
+    /// List of players still at the table (Active or SittingOut).
     pub fn players(&self) -> Vec<&PlayerState> {
         self.players
             .iter()
@@ -600,22 +722,27 @@ impl Game {
             .collect()
     }
 
+    /// All players including those who have left.
     pub fn all_players(&self) -> &[PlayerState] {
         &self.players
     }
 
+    /// Total amount in the pot.
     pub fn pot_total(&self) -> u64 {
         self.pot.total()
     }
 
+    /// Current hand number (starts at 1).
     pub fn hand_number(&self) -> u32 {
         self.hand_number
     }
 
+    /// Game configuration reference.
     pub fn config(&self) -> &GameConfig {
         &self.config
     }
 
+    /// Current bet to match (big blind or last raise).
     pub fn current_bet(&self) -> u64 {
         self.current_bet
     }
