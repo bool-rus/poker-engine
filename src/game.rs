@@ -112,8 +112,8 @@ impl Default for GameConfig {
 /// let cmds = game.start_hand().unwrap();
 ///
 /// // Feed dealer results back
-/// game.handle_event(GameEvent::HoleCardsDealt { player_id: 1, score: 100 }).unwrap();
-/// game.handle_event(GameEvent::HoleCardsDealt { player_id: 2, score: 200 }).unwrap();
+/// game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
+/// game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
 ///
 /// // Player actions
 /// let active = game.active_player().unwrap();
@@ -132,6 +132,7 @@ pub struct Game {
     has_acted: Vec<bool>,
     hand_number: u32,
     community_count: u8,
+    pending_scores: Vec<(PlayerId, HandScore)>,
 }
 
 impl Game {
@@ -158,6 +159,7 @@ impl Game {
             has_acted: Vec::new(),
             hand_number: 0,
             community_count: 0,
+            pending_scores: Vec::new(),
         }
     }
 
@@ -370,30 +372,51 @@ impl Game {
         Ok(commands)
     }
 
-    /// Process a dealer event. Updates hand scores and may trigger phase transitions.
+    /// Process a dealer event. Validates phase and updates game state.
+    ///
+    /// - `HoleCardsDealt` — valid only during PreFlop.
+    /// - `CommunityCardsRevealed` — valid during Flop/Turn/River.
+    /// - `PlayerCardsRevealed` — valid during Showdown. Collects scores and
+    ///   determines the winner once all active players have been revealed.
     ///
     /// Returns additional commands if the engine needs more dealer actions.
     pub fn handle_event(&mut self, event: GameEvent) -> Result<Vec<GameCommand>, PokerError> {
         match event {
-            GameEvent::HoleCardsDealt { player_id, score } => {
-                if let Some(player) = self.players.iter_mut().find(|p| p.id == player_id) {
-                    player.hand_score = Some(score);
+            GameEvent::HoleCardsDealt { player_id } => {
+                if self.phase != GamePhase::PreFlop {
+                    return Err(PokerError::InvalidAction(
+                        "HoleCardsDealt only valid during PreFlop".to_string(),
+                    ));
+                }
+                if !self.players.iter().any(|p| p.id == player_id) {
+                    return Err(PokerError::PlayerNotFound(player_id));
                 }
                 Ok(Vec::new())
             }
-            GameEvent::CommunityCardsRevealed { scores } => {
-                for (player_id, score) in scores {
-                    if let Some(player) = self.players.iter_mut().find(|p| p.id == player_id) {
-                        player.hand_score = Some(score);
+            GameEvent::CommunityCardsRevealed => {
+                match self.phase {
+                    GamePhase::Flop | GamePhase::Turn | GamePhase::River => {}
+                    _ => {
+                        return Err(PokerError::InvalidAction(
+                            "CommunityCardsRevealed only valid during Flop/Turn/River".to_string(),
+                        ));
                     }
                 }
                 Ok(Vec::new())
             }
             GameEvent::PlayerCardsRevealed { player_id, score } => {
-                if let Some(player) = self.players.iter_mut().find(|p| p.id == player_id) {
-                    player.hand_score = Some(score);
+                if self.phase != GamePhase::Showdown {
+                    return Err(PokerError::InvalidAction(
+                        "PlayerCardsRevealed only valid during Showdown".to_string(),
+                    ));
                 }
-                if self.phase == GamePhase::Showdown {
+                self.pending_scores.push((player_id, score));
+                let active_count = self
+                    .players
+                    .iter()
+                    .filter(|p| p.status == PlayerStatus::Active && p.is_active_in_hand())
+                    .count();
+                if self.pending_scores.len() >= active_count {
                     self.finish_showdown()
                 } else {
                     Ok(Vec::new())
@@ -641,12 +664,7 @@ impl Game {
     }
 
     fn finish_showdown(&mut self) -> Result<Vec<GameCommand>, PokerError> {
-        let scores: Vec<(PlayerId, HandScore)> = self
-            .players
-            .iter()
-            .filter(|p| p.status == PlayerStatus::Active && p.is_active_in_hand())
-            .filter_map(|p| p.hand_score.map(|score| (p.id, score)))
-            .collect();
+        let scores = std::mem::take(&mut self.pending_scores);
 
         if scores.is_empty() {
             self.pot = Pot::default();
@@ -931,7 +949,6 @@ mod tests {
         for _ in 0..3 {
             game.handle_event(GameEvent::HoleCardsDealt {
                 player_id: game.active_player().unwrap(),
-                score: 100,
             })
             .unwrap();
         }
@@ -943,9 +960,7 @@ mod tests {
 
         while game.phase() == GamePhase::Flop {
             let cmds = game
-                .handle_event(GameEvent::CommunityCardsRevealed {
-                    scores: vec![(1, 100), (2, 200), (3, 300)],
-                })
+                .handle_event(GameEvent::CommunityCardsRevealed)
                 .unwrap();
             if cmds.is_empty() {
                 let active = game.active_player().unwrap();
@@ -955,9 +970,7 @@ mod tests {
 
         while game.phase() == GamePhase::Turn {
             let cmds = game
-                .handle_event(GameEvent::CommunityCardsRevealed {
-                    scores: vec![(1, 100), (2, 200), (3, 300)],
-                })
+                .handle_event(GameEvent::CommunityCardsRevealed)
                 .unwrap();
             if cmds.is_empty() {
                 let active = game.active_player().unwrap();
@@ -967,9 +980,7 @@ mod tests {
 
         while game.phase() == GamePhase::River {
             let cmds = game
-                .handle_event(GameEvent::CommunityCardsRevealed {
-                    scores: vec![(1, 100), (2, 200), (3, 300)],
-                })
+                .handle_event(GameEvent::CommunityCardsRevealed)
                 .unwrap();
             if cmds.is_empty() {
                 let active = game.active_player().unwrap();
@@ -1005,12 +1016,10 @@ mod tests {
         game.start_hand().unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 1,
-            score: 100,
         })
         .unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 2,
-            score: 200,
         })
         .unwrap();
 
@@ -1025,12 +1034,10 @@ mod tests {
         game.start_hand().unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 1,
-            score: 100,
         })
         .unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 2,
-            score: 200,
         })
         .unwrap();
 
@@ -1044,12 +1051,10 @@ mod tests {
         game.start_hand().unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 1,
-            score: 100,
         })
         .unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 2,
-            score: 200,
         })
         .unwrap();
 
@@ -1069,12 +1074,10 @@ mod tests {
         game.start_hand().unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 1,
-            score: 100,
         })
         .unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 2,
-            score: 200,
         })
         .unwrap();
 
@@ -1089,12 +1092,10 @@ mod tests {
         game.start_hand().unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 1,
-            score: 100,
         })
         .unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 2,
-            score: 200,
         })
         .unwrap();
 
@@ -1115,12 +1116,10 @@ mod tests {
         game.start_hand().unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 1,
-            score: 100,
         })
         .unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 2,
-            score: 200,
         })
         .unwrap();
 
@@ -1135,12 +1134,10 @@ mod tests {
         game.start_hand().unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 1,
-            score: 100,
         })
         .unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 2,
-            score: 200,
         })
         .unwrap();
 
@@ -1156,12 +1153,10 @@ mod tests {
         game.start_hand().unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 1,
-            score: 100,
         })
         .unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 2,
-            score: 200,
         })
         .unwrap();
 
@@ -1179,12 +1174,10 @@ mod tests {
         game.start_hand().unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 1,
-            score: 100,
         })
         .unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 2,
-            score: 200,
         })
         .unwrap();
 
@@ -1195,9 +1188,7 @@ mod tests {
         game.player_action(other, PlayerAction::Check).unwrap();
         assert_eq!(game.phase(), GamePhase::Flop);
 
-        game.handle_event(GameEvent::CommunityCardsRevealed {
-            scores: vec![(1, 100), (2, 200)],
-        })
+        game.handle_event(GameEvent::CommunityCardsRevealed)
         .unwrap();
         assert_eq!(game.phase(), GamePhase::Flop);
 
@@ -1207,9 +1198,7 @@ mod tests {
         game.player_action(o2, PlayerAction::Check).unwrap();
         assert_eq!(game.phase(), GamePhase::Turn);
 
-        game.handle_event(GameEvent::CommunityCardsRevealed {
-            scores: vec![(1, 100), (2, 200)],
-        })
+        game.handle_event(GameEvent::CommunityCardsRevealed)
         .unwrap();
         assert_eq!(game.phase(), GamePhase::Turn);
 
@@ -1219,9 +1208,7 @@ mod tests {
         game.player_action(o3, PlayerAction::Check).unwrap();
         assert_eq!(game.phase(), GamePhase::River);
 
-        game.handle_event(GameEvent::CommunityCardsRevealed {
-            scores: vec![(1, 100), (2, 200)],
-        })
+        game.handle_event(GameEvent::CommunityCardsRevealed)
         .unwrap();
         assert_eq!(game.phase(), GamePhase::River);
 
@@ -1238,12 +1225,10 @@ mod tests {
         game.start_hand().unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 1,
-            score: 100,
         })
         .unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 2,
-            score: 200,
         })
         .unwrap();
 
@@ -1253,27 +1238,21 @@ mod tests {
         game.player_action(active, PlayerAction::Call).unwrap();
         game.player_action(other, PlayerAction::Check).unwrap();
 
-        game.handle_event(GameEvent::CommunityCardsRevealed {
-            scores: vec![(1, 100), (2, 200)],
-        })
+        game.handle_event(GameEvent::CommunityCardsRevealed)
         .unwrap();
         let a2 = game.active_player().unwrap();
         let o2 = if a2 == 1 { 2 } else { 1 };
         game.player_action(a2, PlayerAction::Check).unwrap();
         game.player_action(o2, PlayerAction::Check).unwrap();
 
-        game.handle_event(GameEvent::CommunityCardsRevealed {
-            scores: vec![(1, 100), (2, 200)],
-        })
+        game.handle_event(GameEvent::CommunityCardsRevealed)
         .unwrap();
         let a3 = game.active_player().unwrap();
         let o3 = if a3 == 1 { 2 } else { 1 };
         game.player_action(a3, PlayerAction::Check).unwrap();
         game.player_action(o3, PlayerAction::Check).unwrap();
 
-        game.handle_event(GameEvent::CommunityCardsRevealed {
-            scores: vec![(1, 100), (2, 200)],
-        })
+        game.handle_event(GameEvent::CommunityCardsRevealed)
         .unwrap();
 
         let a4 = game.active_player().unwrap();
@@ -1311,12 +1290,10 @@ mod tests {
         game.start_hand().unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 1,
-            score: 100,
         })
         .unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 2,
-            score: 200,
         })
         .unwrap();
 
@@ -1348,12 +1325,10 @@ mod tests {
         game.start_hand().unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 1,
-            score: 100,
         })
         .unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 2,
-            score: 200,
         })
         .unwrap();
         let active = game.active_player().unwrap();
@@ -1373,12 +1348,10 @@ mod tests {
             assert_eq!(game.hand_number(), i + 1);
             game.handle_event(GameEvent::HoleCardsDealt {
                 player_id: 1,
-                score: 100,
             })
             .unwrap();
             game.handle_event(GameEvent::HoleCardsDealt {
                 player_id: 2,
-                score: 200,
             })
             .unwrap();
             let active = game.active_player().unwrap();
@@ -1417,12 +1390,10 @@ mod tests {
         game.start_hand().unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 1,
-            score: 100,
         })
         .unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 2,
-            score: 200,
         })
         .unwrap();
 
@@ -1451,11 +1422,10 @@ mod tests {
         game.start_hand().unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 1,
-            score: 42,
         })
         .unwrap();
         let p = game.all_players().iter().find(|p| p.id == 1).unwrap();
-        assert_eq!(p.hand_score, Some(42));
+        assert!(p.is_active_in_hand());
     }
 
     // === Edge case: 3 player fold to one ===
@@ -1466,17 +1436,14 @@ mod tests {
         game.start_hand().unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 1,
-            score: 100,
         })
         .unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 2,
-            score: 200,
         })
         .unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 3,
-            score: 300,
         })
         .unwrap();
 
@@ -1497,12 +1464,10 @@ mod tests {
         game.start_hand().unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 1,
-            score: 100,
         })
         .unwrap();
         game.handle_event(GameEvent::HoleCardsDealt {
             player_id: 2,
-            score: 200,
         })
         .unwrap();
 

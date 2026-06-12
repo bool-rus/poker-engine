@@ -62,8 +62,6 @@ pub struct PlayerState {
     pub wants_in: bool,
     /// Whether the player is all-in.
     pub all_in: bool,
-    /// Hand score assigned by the dealer (set via [`GameEvent`](crate::GameEvent)).
-    pub hand_score: Option<u64>,
 }
 
 impl PlayerState {
@@ -77,7 +75,6 @@ impl PlayerState {
             is_dealer: false,
             wants_in: true,
             all_in: false,
-            hand_score: None,
         }
     }
 
@@ -106,11 +103,10 @@ impl PlayerState {
         self.chips += amount;
     }
 
-    /// Reset player state for a new hand (clears bet, all_in, hand_score).
+    /// Reset player state for a new hand (clears bet and all_in).
     pub fn reset_for_new_hand(&mut self) {
         self.bet = 0;
         self.all_in = false;
-        self.hand_score = None;
     }
 }
 
@@ -128,7 +124,6 @@ mod tests {
         assert!(!p.is_dealer);
         assert!(p.wants_in);
         assert!(!p.all_in);
-        assert!(p.hand_score.is_none());
     }
 
     #[test]
@@ -198,11 +193,9 @@ mod tests {
         let mut p = PlayerState::new(1, 1000);
         p.bet = 200;
         p.all_in = true;
-        p.hand_score = Some(999);
         p.reset_for_new_hand();
         assert_eq!(p.bet, 0);
         assert!(!p.all_in);
-        assert!(p.hand_score.is_none());
     }
 
     #[test]

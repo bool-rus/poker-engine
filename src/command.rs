@@ -48,8 +48,8 @@ pub enum GameCommand {
 /// game.add_player(1).unwrap();
 /// game.add_player(2).unwrap();
 /// game.start_hand().unwrap();
-/// game.handle_event(GameEvent::HoleCardsDealt { player_id: 1, score: 100 }).unwrap();
-/// game.handle_event(GameEvent::HoleCardsDealt { player_id: 2, score: 200 }).unwrap();
+/// game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
+/// game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
 ///
 /// let active = game.active_player().unwrap();
 /// game.player_action(active, PlayerAction::Call).unwrap();

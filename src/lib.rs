@@ -24,29 +24,55 @@
 //! ```rust
 //! use poker_engine::{Game, GameConfig, PlayerAction, GameCommand, GameEvent};
 //!
-//! let config = GameConfig::default();
-//! let mut game = Game::new(config);
-//!
-//! // Add players
+//! let mut game = Game::new(GameConfig::default());
 //! game.add_player(1).unwrap();
 //! game.add_player(2).unwrap();
 //!
-//! // Start a hand — engine returns commands for the dealer
+//! // --- Pre-flop ---
 //! let cmds = game.start_hand().unwrap();
-//! // cmds contains [DealHoleCards{player_id:1}, DealHoleCards{player_id:2}]
+//! // cmds: [DealHoleCards{1}, DealHoleCards{2}]
 //!
-//! // Dealer processes cards and returns scores
-//! game.handle_event(GameEvent::HoleCardsDealt { player_id: 1, score: 8500000 }).unwrap();
-//! game.handle_event(GameEvent::HoleCardsDealt { player_id: 2, score: 4200000 }).unwrap();
+//! game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
+//! game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
 //!
-//! // Players act
 //! let active = game.active_player().unwrap();
-//! game.player_action(active, PlayerAction::Call).unwrap();
 //! let other = if active == 1 { 2 } else { 1 };
+//! game.player_action(active, PlayerAction::Call).unwrap();
 //! game.player_action(other, PlayerAction::Check).unwrap();
-//!
-//! // Now in Flop phase — engine returns RevealCommunityCards{count: 3}
 //! assert_eq!(game.phase(), poker_engine::GamePhase::Flop);
+//!
+//! // --- Flop ---
+//! // Engine requests RevealCommunityCards{count: 3}
+//! game.handle_event(GameEvent::CommunityCardsRevealed).unwrap();
+//!
+//! let a = game.active_player().unwrap();
+//! let o = if a == 1 { 2 } else { 1 };
+//! game.player_action(a, PlayerAction::Check).unwrap();
+//! game.player_action(o, PlayerAction::Check).unwrap();
+//! assert_eq!(game.phase(), poker_engine::GamePhase::Turn);
+//!
+//! // --- Turn ---
+//! game.handle_event(GameEvent::CommunityCardsRevealed).unwrap();
+//! let a = game.active_player().unwrap();
+//! let o = if a == 1 { 2 } else { 1 };
+//! game.player_action(a, PlayerAction::Check).unwrap();
+//! game.player_action(o, PlayerAction::Check).unwrap();
+//! assert_eq!(game.phase(), poker_engine::GamePhase::River);
+//!
+//! // --- River ---
+//! game.handle_event(GameEvent::CommunityCardsRevealed).unwrap();
+//! let a = game.active_player().unwrap();
+//! let o = if a == 1 { 2 } else { 1 };
+//! game.player_action(a, PlayerAction::Check).unwrap();
+//! game.player_action(o, PlayerAction::Check).unwrap();
+//! assert_eq!(game.phase(), poker_engine::GamePhase::Showdown);
+//!
+//! // --- Showdown ---
+//! // Dealer evaluates hands and sends scores
+//! game.handle_event(GameEvent::PlayerCardsRevealed { player_id: 1, score: 500 }).unwrap();
+//! game.handle_event(GameEvent::PlayerCardsRevealed { player_id: 2, score: 800 }).unwrap();
+//! // Hand complete — player 2 wins
+//! assert_eq!(game.phase(), poker_engine::GamePhase::GameOver);
 //! ```
 
 pub mod error;
