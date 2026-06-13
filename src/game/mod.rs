@@ -418,7 +418,14 @@ impl Game {
                         ));
                     }
                 }
-                Ok(Vec::new())
+                let all_all_in = self.players.iter()
+                    .filter(|p| p.status == PlayerStatus::Active && p.is_active_in_hand())
+                    .all(|p| p.all_in);
+                if all_all_in {
+                    self.advance_to_next_phase()
+                } else {
+                    Ok(Vec::new())
+                }
             }
             GameEvent::PlayerCardsRevealed { player_id, score } => {
                 if self.phase != GamePhase::Showdown {

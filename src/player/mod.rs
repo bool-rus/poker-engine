@@ -80,7 +80,7 @@ impl PlayerState {
 
     /// Returns `true` if the player is active in the current hand.
     pub fn is_active_in_hand(&self) -> bool {
-        self.status == PlayerStatus::Active && (self.chips > 0 || self.bet > 0)
+        self.status == PlayerStatus::Active && (self.chips > 0 || self.bet > 0 || self.all_in)
     }
 
     /// Returns `true` if the player can still act (not all-in, has chips).
