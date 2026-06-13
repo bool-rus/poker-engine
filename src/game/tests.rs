@@ -62,7 +62,53 @@ fn test_table_full() {
 fn test_add_player_during_game() {
     let mut game = setup_two_player_game();
     game.start_hand().unwrap();
-    assert_eq!(game.add_player(3), Err(PokerError::GameInProgress));
+    // Adding a player during an active game is allowed — they sit without cards
+    assert!(game.add_player(3).is_ok());
+    let p3 = game.all_players().iter().find(|p| p.id == 3).unwrap();
+    assert_eq!(p3.status, PlayerStatus::SittingOut);
+    assert!(p3.wants_in);
+}
+
+#[test]
+fn test_add_player_during_game_no_cards_current_hand() {
+    let mut game = setup_two_player_game();
+    let cmds = game.start_hand().unwrap();
+    // Only 2 DealHoleCards — new player not yet added
+    assert_eq!(cmds.len(), 2);
+
+    // Add player 3 mid-game
+    game.add_player(3).unwrap();
+
+    // Hand continues normally — no extra DealHoleCards for player 3
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+
+    // Player 3 is not in eligible players
+    let active = game.active_player().unwrap();
+    assert!(active == 1 || active == 2);
+}
+
+#[test]
+fn test_add_player_during_game_gets_cards_next_hand() {
+    let mut game = setup_two_player_game();
+
+    // Hand 1
+    game.start_hand().unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+    let a = game.active_player().unwrap();
+    game.player_action(a, PlayerAction::Fold).unwrap();
+
+    // Add player 3 after hand 1
+    game.add_player(3).unwrap();
+
+    // Hand 2 — player 3 gets cards
+    let cmds = game.start_hand().unwrap();
+    let ids: Vec<PlayerId> = cmds.iter().map(|c| match c {
+        GameCommand::DealHoleCards { player_id } => *player_id,
+        _ => panic!("expected DealHoleCards"),
+    }).collect();
+    assert!(ids.contains(&3), "player 3 should get cards in next hand");
 }
 
 #[test]

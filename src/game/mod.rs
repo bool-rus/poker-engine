@@ -163,7 +163,10 @@ impl Game {
         }
     }
 
-    /// Add a player to the table. Can only be done between hands.
+    /// Add a player to the table.
+    ///
+    /// Can be called between hands or during an active game. When added mid-game,
+    /// the player sits at the table without cards and receives cards on the next deal.
     ///
     /// The new player is inserted at a position in the seat order so that:
     /// - With 2 players (heads-up → 3): new player gets small blind.
@@ -171,13 +174,9 @@ impl Game {
     ///
     /// # Errors
     ///
-    /// Returns [`PokerError::GameInProgress`] if a hand is in progress.
     /// Returns [`PokerError::PlayerAlreadyAtTable`] if the player is already seated.
     /// Returns [`PokerError::TableFull`] if the table is at capacity.
     pub fn add_player(&mut self, player_id: PlayerId) -> Result<(), PokerError> {
-        if self.phase != GamePhase::WaitingToStart && self.phase != GamePhase::GameOver {
-            return Err(PokerError::GameInProgress);
-        }
         if self.players.iter().any(|p| p.id == player_id) {
             return Err(PokerError::PlayerAlreadyAtTable(player_id));
         }
@@ -187,11 +186,19 @@ impl Game {
             });
         }
 
+        let in_progress = self.phase != GamePhase::WaitingToStart && self.phase != GamePhase::GameOver;
         let n = self.players.len();
-        let new_player = PlayerState::new(player_id, self.config.starting_chips);
+        let mut new_player = PlayerState::new(player_id, self.config.starting_chips);
+        if in_progress {
+            new_player.status = PlayerStatus::SittingOut;
+            new_player.wants_in = true;
+        }
 
         if n < 2 {
             self.players.push(new_player);
+            if in_progress {
+                self.has_acted.push(false);
+            }
         } else {
             let d = self.dealer_index;
             let insert_at = if n == 2 {
@@ -203,6 +210,14 @@ impl Game {
             self.players.insert(insert_at, new_player);
             if insert_at <= d {
                 self.dealer_index += 1;
+            }
+            if in_progress {
+                self.has_acted.insert(insert_at, false);
+                if let Some(ai) = self.acting_index {
+                    if insert_at <= ai {
+                        self.acting_index = Some(ai + 1);
+                    }
+                }
             }
         }
 

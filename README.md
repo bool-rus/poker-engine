@@ -34,19 +34,23 @@ let cmds = game.start_hand().unwrap();
 game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
 game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
 
+// player_action returns Vec<GameCommand> — commands for the dealer
 let active = game.active_player().unwrap();
 let other = if active == 1 { 2 } else { 1 };
-game.player_action(active, PlayerAction::Call).unwrap();
-game.player_action(other, PlayerAction::Check).unwrap();
+let cmds = game.player_action(active, PlayerAction::Call).unwrap();
+// cmds: [] — no dealer action needed yet
+let cmds = game.player_action(other, PlayerAction::Check).unwrap();
+// cmds: [RevealCommunityCards{count: 3}] — dealer should reveal the flop
 assert_eq!(game.phase(), poker_engine::GamePhase::Flop);
 
 // --- Flop ---
-// Engine returns RevealCommunityCards{count: 3}
+// Send RevealCommunityCards result back to engine
 game.handle_event(GameEvent::CommunityCardsRevealed).unwrap();
 let a = game.active_player().unwrap();
 let o = if a == 1 { 2 } else { 1 };
 game.player_action(a, PlayerAction::Check).unwrap();
-game.player_action(o, PlayerAction::Check).unwrap();
+let cmds = game.player_action(o, PlayerAction::Check).unwrap();
+// cmds: [RevealCommunityCards{count: 1}] — dealer should reveal the turn
 assert_eq!(game.phase(), poker_engine::GamePhase::Turn);
 
 // --- Turn ---
@@ -54,7 +58,8 @@ game.handle_event(GameEvent::CommunityCardsRevealed).unwrap();
 let a = game.active_player().unwrap();
 let o = if a == 1 { 2 } else { 1 };
 game.player_action(a, PlayerAction::Check).unwrap();
-game.player_action(o, PlayerAction::Check).unwrap();
+let cmds = game.player_action(o, PlayerAction::Check).unwrap();
+// cmds: [RevealCommunityCards{count: 1}] — dealer should reveal the river
 assert_eq!(game.phase(), poker_engine::GamePhase::River);
 
 // --- River ---
@@ -62,7 +67,8 @@ game.handle_event(GameEvent::CommunityCardsRevealed).unwrap();
 let a = game.active_player().unwrap();
 let o = if a == 1 { 2 } else { 1 };
 game.player_action(a, PlayerAction::Check).unwrap();
-game.player_action(o, PlayerAction::Check).unwrap();
+let cmds = game.player_action(o, PlayerAction::Check).unwrap();
+// cmds: [RevealPlayerCards{player_id: 1}, RevealPlayerCards{player_id: 2}]
 assert_eq!(game.phase(), poker_engine::GamePhase::Showdown);
 
 // --- Showdown ---
@@ -136,7 +142,7 @@ game.rebuy(1, 5000)?;          // Add chips (up to rebuy_amount)
 ## Testing
 
 ```bash
-cargo test          # Run all tests (54 unit + 13 doc tests)
+cargo test          # Run all tests (59 unit + 13 doc tests)
 cargo test --doc    # Run doc tests only
 ```
 
