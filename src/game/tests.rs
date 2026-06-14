@@ -27,6 +27,26 @@ fn setup_three_player_game() -> Game {
     game
 }
 
+fn deal_cards(game: &mut Game) {
+    let resp = game.start_hand().unwrap();
+    match resp {
+        GameResponse::DealerCommand(GameCommand::DealHoleCards { player_ids }) => {
+            for id in player_ids {
+                game.handle_event(GameEvent::HoleCardsDealt { player_id: id })
+                    .unwrap();
+            }
+        }
+        _ => panic!("expected DealHoleCards"),
+    }
+}
+
+fn get_player_turn(game: &GameResponse) -> (PlayerId, &Vec<AvailableAction>) {
+    match game {
+        GameResponse::PlayerTurn { player_id, actions } => (*player_id, actions),
+        _ => panic!("expected PlayerTurn"),
+    }
+}
+
 // === Player management tests ===
 
 #[test]
@@ -72,9 +92,14 @@ fn test_add_player_during_game() {
 #[test]
 fn test_add_player_during_game_no_cards_current_hand() {
     let mut game = setup_two_player_game();
-    let cmds = game.start_hand().unwrap();
-    // Only 2 DealHoleCards — new player not yet added
-    assert_eq!(cmds.len(), 2);
+    let resp = game.start_hand().unwrap();
+    // Only DealHoleCards for 2 players — new player not yet added
+    match resp {
+        GameResponse::DealerCommand(GameCommand::DealHoleCards { ref player_ids }) => {
+            assert_eq!(player_ids.len(), 2);
+        }
+        _ => panic!("expected DealHoleCards"),
+    }
 
     // Add player 3 mid-game
     game.add_player(3, 500).unwrap();
@@ -93,22 +118,29 @@ fn test_add_player_during_game_gets_cards_next_hand() {
     let mut game = setup_two_player_game();
 
     // Hand 1
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+    let resp = game.start_hand().unwrap();
+    match resp {
+        GameResponse::DealerCommand(GameCommand::DealHoleCards { player_ids }) => {
+            for id in player_ids {
+                game.handle_event(GameEvent::HoleCardsDealt { player_id: id }).unwrap();
+            }
+        }
+        _ => panic!("expected DealHoleCards"),
+    }
     let a = game.active_player().unwrap();
-    game.player_action(a, PlayerAction::Fold).unwrap();
+    game.game_response(a, PlayerAction::Fold).unwrap();
 
     // Add player 3 after hand 1
     game.add_player(3, 500).unwrap();
 
     // Hand 2 — player 3 gets cards
-    let cmds = game.start_hand().unwrap();
-    let ids: Vec<PlayerId> = cmds.iter().map(|c| match c {
-        GameCommand::DealHoleCards { player_id } => *player_id,
+    let resp = game.start_hand().unwrap();
+    match resp {
+        GameResponse::DealerCommand(GameCommand::DealHoleCards { player_ids }) => {
+            assert!(player_ids.contains(&3), "player 3 should get cards in next hand");
+        }
         _ => panic!("expected DealHoleCards"),
-    }).collect();
-    assert!(ids.contains(&3), "player 3 should get cards in next hand");
+    }
 }
 
 #[test]
@@ -181,10 +213,15 @@ fn test_can_start_hand() {
 #[test]
 fn test_start_hand_commands() {
     let mut game = setup_two_player_game();
-    let cmds = game.start_hand().unwrap();
-    assert_eq!(cmds.len(), 2);
-    assert!(cmds.contains(&GameCommand::DealHoleCards { player_id: 1 }));
-    assert!(cmds.contains(&GameCommand::DealHoleCards { player_id: 2 }));
+    let resp = game.start_hand().unwrap();
+    match resp {
+        GameResponse::DealerCommand(GameCommand::DealHoleCards { player_ids }) => {
+            assert_eq!(player_ids.len(), 2);
+            assert!(player_ids.contains(&1));
+            assert!(player_ids.contains(&2));
+        }
+        _ => panic!("expected DealHoleCards"),
+    }
     assert_eq!(game.phase(), GamePhase::PreFlop);
     assert_eq!(game.hand_number(), 1);
 }
@@ -209,50 +246,52 @@ fn test_start_hand_not_enough_players() {
 #[test]
 fn test_dealer_rotation() {
     let mut game = setup_three_player_game();
-    game.start_hand().unwrap();
+    let resp = game.start_hand().unwrap();
     let dealer_id = game.all_players().iter().find(|p| p.is_dealer).unwrap().id;
     // With new insertion order [P3, P1, P2], hand 1 dealer is P3
     assert_eq!(dealer_id, 3);
 
-    for _ in 0..3 {
-        game.handle_event(GameEvent::HoleCardsDealt {
-            player_id: game.active_player().unwrap(),
-        })
-        .unwrap();
+    match resp {
+        GameResponse::DealerCommand(GameCommand::DealHoleCards { player_ids }) => {
+            for id in player_ids {
+                game.handle_event(GameEvent::HoleCardsDealt { player_id: id }).unwrap();
+            }
+        }
+        _ => panic!("expected DealHoleCards"),
     }
 
     while game.phase() == GamePhase::PreFlop {
         let active = game.active_player().unwrap();
-        game.player_action(active, PlayerAction::Call).unwrap();
+        game.game_response(active, PlayerAction::Call).unwrap();
     }
 
     while game.phase() == GamePhase::Flop {
-        let cmds = game
+        let resp = game
             .handle_event(GameEvent::CommunityCardsRevealed)
             .unwrap();
-        if cmds.is_empty() {
+        if let GameResponse::PlayerTurn { .. } = resp {
             let active = game.active_player().unwrap();
-            game.player_action(active, PlayerAction::Check).unwrap();
+            game.game_response(active, PlayerAction::Check).unwrap();
         }
     }
 
     while game.phase() == GamePhase::Turn {
-        let cmds = game
+        let resp = game
             .handle_event(GameEvent::CommunityCardsRevealed)
             .unwrap();
-        if cmds.is_empty() {
+        if let GameResponse::PlayerTurn { .. } = resp {
             let active = game.active_player().unwrap();
-            game.player_action(active, PlayerAction::Check).unwrap();
+            game.game_response(active, PlayerAction::Check).unwrap();
         }
     }
 
     while game.phase() == GamePhase::River {
-        let cmds = game
+        let resp = game
             .handle_event(GameEvent::CommunityCardsRevealed)
             .unwrap();
-        if cmds.is_empty() {
+        if let GameResponse::PlayerTurn { .. } = resp {
             let active = game.active_player().unwrap();
-            game.player_action(active, PlayerAction::Check).unwrap();
+            game.game_response(active, PlayerAction::Check).unwrap();
         }
     }
 
@@ -271,10 +310,14 @@ fn test_dealer_rotation() {
         }
     }
 
-    game.start_hand().unwrap();
+    let resp = game.start_hand().unwrap();
     let dealer_id = game.all_players().iter().find(|p| p.is_dealer).unwrap().id;
     // Hand 2: rotation from P3 → next is P1
     assert_eq!(dealer_id, 1);
+    match resp {
+        GameResponse::DealerCommand(GameCommand::DealHoleCards { .. }) => {}
+        _ => panic!("expected DealHoleCards"),
+    }
 }
 
 // === Betting action tests ===
@@ -282,53 +325,29 @@ fn test_dealer_rotation() {
 #[test]
 fn test_fold() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 1,
-    })
-    .unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 2,
-    })
-    .unwrap();
+    deal_cards(&mut game);
 
     let active = game.active_player().unwrap();
-    game.player_action(active, PlayerAction::Fold).unwrap();
+    game.game_response(active, PlayerAction::Fold).unwrap();
     assert_eq!(game.phase(), GamePhase::GameOver);
 }
 
 #[test]
 fn test_check_preflop() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 1,
-    })
-    .unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 2,
-    })
-    .unwrap();
+    deal_cards(&mut game);
 
     let active = game.active_player().unwrap();
-    assert!(game.player_action(active, PlayerAction::Check).is_err());
+    assert!(game.game_response(active, PlayerAction::Check).is_err());
 }
 
 #[test]
 fn test_call() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 1,
-    })
-    .unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 2,
-    })
-    .unwrap();
+    deal_cards(&mut game);
 
     let active = game.active_player().unwrap();
-    game.player_action(active, PlayerAction::Call).unwrap();
+    game.game_response(active, PlayerAction::Call).unwrap();
     let p = game
         .all_players()
         .iter()
@@ -340,36 +359,20 @@ fn test_call() {
 #[test]
 fn test_raise() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 1,
-    })
-    .unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 2,
-    })
-    .unwrap();
+    deal_cards(&mut game);
 
     let active = game.active_player().unwrap();
-    game.player_action(active, PlayerAction::Raise(100)).unwrap();
+    game.game_response(active, PlayerAction::Raise(100)).unwrap();
     assert_eq!(game.current_bet(), 200);
 }
 
 #[test]
 fn test_all_in() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 1,
-    })
-    .unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 2,
-    })
-    .unwrap();
+    deal_cards(&mut game);
 
     let active = game.active_player().unwrap();
-    game.player_action(active, PlayerAction::AllIn).unwrap();
+    game.game_response(active, PlayerAction::AllIn).unwrap();
     let p = game
         .all_players()
         .iter()
@@ -382,36 +385,20 @@ fn test_all_in() {
 #[test]
 fn test_wrong_player_turn() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 1,
-    })
-    .unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 2,
-    })
-    .unwrap();
+    deal_cards(&mut game);
 
     let active = game.active_player().unwrap();
     let other = if active == 1 { 2 } else { 1 };
-    assert!(game.player_action(other, PlayerAction::Check).is_err());
+    assert!(game.game_response(other, PlayerAction::Check).is_err());
 }
 
 #[test]
 fn test_cannot_raise_below_minimum() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 1,
-    })
-    .unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 2,
-    })
-    .unwrap();
+    deal_cards(&mut game);
 
     let active = game.active_player().unwrap();
-    assert!(game.player_action(active, PlayerAction::Raise(10)).is_err());
+    assert!(game.game_response(active, PlayerAction::Raise(10)).is_err());
 }
 
 // === Phase transition tests ===
@@ -419,20 +406,12 @@ fn test_cannot_raise_below_minimum() {
 #[test]
 fn test_preflop_to_flop() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 1,
-    })
-    .unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 2,
-    })
-    .unwrap();
+    deal_cards(&mut game);
 
     let active = game.active_player().unwrap();
-    game.player_action(active, PlayerAction::Call).unwrap();
+    game.game_response(active, PlayerAction::Call).unwrap();
     let other = if active == 1 { 2 } else { 1 };
-    game.player_action(other, PlayerAction::Check).unwrap();
+    game.game_response(other, PlayerAction::Check).unwrap();
 
     assert_eq!(game.phase(), GamePhase::Flop);
 }
@@ -440,94 +419,78 @@ fn test_preflop_to_flop() {
 #[test]
 fn test_full_hand_checkdown() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 1,
-    })
-    .unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 2,
-    })
-    .unwrap();
+    deal_cards(&mut game);
 
     let active = game.active_player().unwrap();
     let other = if active == 1 { 2 } else { 1 };
 
-    game.player_action(active, PlayerAction::Call).unwrap();
-    game.player_action(other, PlayerAction::Check).unwrap();
+    game.game_response(active, PlayerAction::Call).unwrap();
+    game.game_response(other, PlayerAction::Check).unwrap();
     assert_eq!(game.phase(), GamePhase::Flop);
 
     game.handle_event(GameEvent::CommunityCardsRevealed)
-    .unwrap();
+        .unwrap();
     assert_eq!(game.phase(), GamePhase::Flop);
 
     let a2 = game.active_player().unwrap();
     let o2 = if a2 == 1 { 2 } else { 1 };
-    game.player_action(a2, PlayerAction::Check).unwrap();
-    game.player_action(o2, PlayerAction::Check).unwrap();
+    game.game_response(a2, PlayerAction::Check).unwrap();
+    game.game_response(o2, PlayerAction::Check).unwrap();
     assert_eq!(game.phase(), GamePhase::Turn);
 
     game.handle_event(GameEvent::CommunityCardsRevealed)
-    .unwrap();
+        .unwrap();
     assert_eq!(game.phase(), GamePhase::Turn);
 
     let a3 = game.active_player().unwrap();
     let o3 = if a3 == 1 { 2 } else { 1 };
-    game.player_action(a3, PlayerAction::Check).unwrap();
-    game.player_action(o3, PlayerAction::Check).unwrap();
+    game.game_response(a3, PlayerAction::Check).unwrap();
+    game.game_response(o3, PlayerAction::Check).unwrap();
     assert_eq!(game.phase(), GamePhase::River);
 
     game.handle_event(GameEvent::CommunityCardsRevealed)
-    .unwrap();
+        .unwrap();
     assert_eq!(game.phase(), GamePhase::River);
 
     let a4 = game.active_player().unwrap();
     let o4 = if a4 == 1 { 2 } else { 1 };
-    game.player_action(a4, PlayerAction::Check).unwrap();
-    game.player_action(o4, PlayerAction::Check).unwrap();
+    game.game_response(a4, PlayerAction::Check).unwrap();
+    game.game_response(o4, PlayerAction::Check).unwrap();
     assert_eq!(game.phase(), GamePhase::Showdown);
 }
 
 #[test]
 fn test_showdown_with_winner() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 1,
-    })
-    .unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 2,
-    })
-    .unwrap();
+    deal_cards(&mut game);
 
     let active = game.active_player().unwrap();
     let other = if active == 1 { 2 } else { 1 };
 
-    game.player_action(active, PlayerAction::Call).unwrap();
-    game.player_action(other, PlayerAction::Check).unwrap();
+    game.game_response(active, PlayerAction::Call).unwrap();
+    game.game_response(other, PlayerAction::Check).unwrap();
 
     game.handle_event(GameEvent::CommunityCardsRevealed)
-    .unwrap();
+        .unwrap();
     let a2 = game.active_player().unwrap();
     let o2 = if a2 == 1 { 2 } else { 1 };
-    game.player_action(a2, PlayerAction::Check).unwrap();
-    game.player_action(o2, PlayerAction::Check).unwrap();
+    game.game_response(a2, PlayerAction::Check).unwrap();
+    game.game_response(o2, PlayerAction::Check).unwrap();
 
     game.handle_event(GameEvent::CommunityCardsRevealed)
-    .unwrap();
+        .unwrap();
     let a3 = game.active_player().unwrap();
     let o3 = if a3 == 1 { 2 } else { 1 };
-    game.player_action(a3, PlayerAction::Check).unwrap();
-    game.player_action(o3, PlayerAction::Check).unwrap();
+    game.game_response(a3, PlayerAction::Check).unwrap();
+    game.game_response(o3, PlayerAction::Check).unwrap();
 
     game.handle_event(GameEvent::CommunityCardsRevealed)
-    .unwrap();
+        .unwrap();
 
     let a4 = game.active_player().unwrap();
     let o4 = if a4 == 1 { 2 } else { 1 };
-    game.player_action(a4, PlayerAction::Check).unwrap();
-    game.player_action(o4, PlayerAction::Check).unwrap();
+    game.game_response(a4, PlayerAction::Check).unwrap();
+    game.game_response(o4, PlayerAction::Check).unwrap();
     assert_eq!(game.phase(), GamePhase::Showdown);
 
     let _ = game.handle_event(GameEvent::PlayerCardsRevealed {
@@ -556,19 +519,11 @@ fn test_fold_gives_pot_to_remaining_player() {
     let p1_start = game.all_players().iter().find(|p| p.id == 1).unwrap().chips;
     let p2_start = game.all_players().iter().find(|p| p.id == 2).unwrap().chips;
 
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 1,
-    })
-    .unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 2,
-    })
-    .unwrap();
+    deal_cards(&mut game);
 
     let active = game.active_player().unwrap();
     let other = if active == 1 { 2 } else { 1 };
-    game.player_action(active, PlayerAction::Fold).unwrap();
+    game.game_response(active, PlayerAction::Fold).unwrap();
 
     assert_eq!(game.phase(), GamePhase::GameOver);
     let _winner = game.all_players().iter().find(|p| p.id == other).unwrap();
@@ -585,25 +540,17 @@ fn test_fold_gives_pot_to_remaining_player() {
 #[test]
 fn test_player_action_when_not_started() {
     let mut game = setup_two_player_game();
-    assert!(game.player_action(1, PlayerAction::Check).is_err());
+    assert!(game.game_response(1, PlayerAction::Check).is_err());
 }
 
 #[test]
 fn test_player_action_after_game_over() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 1,
-    })
-    .unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 2,
-    })
-    .unwrap();
+    deal_cards(&mut game);
     let active = game.active_player().unwrap();
-    game.player_action(active, PlayerAction::Fold).unwrap();
+    game.game_response(active, PlayerAction::Fold).unwrap();
     assert_eq!(game.phase(), GamePhase::GameOver);
-    assert!(game.player_action(1, PlayerAction::Check).is_err());
+    assert!(game.game_response(1, PlayerAction::Check).is_err());
 }
 
 // === Multiple hands ===
@@ -613,18 +560,10 @@ fn test_multiple_hands() {
     let mut game = setup_two_player_game();
 
     for i in 0..3 {
-        game.start_hand().unwrap();
+        deal_cards(&mut game);
         assert_eq!(game.hand_number(), i + 1);
-        game.handle_event(GameEvent::HoleCardsDealt {
-            player_id: 1,
-        })
-        .unwrap();
-        game.handle_event(GameEvent::HoleCardsDealt {
-            player_id: 2,
-        })
-        .unwrap();
         let active = game.active_player().unwrap();
-        game.player_action(active, PlayerAction::Fold).unwrap();
+        game.game_response(active, PlayerAction::Fold).unwrap();
         assert_eq!(game.phase(), GamePhase::GameOver);
     }
     assert_eq!(game.hand_number(), 3);
@@ -654,22 +593,14 @@ fn test_config_custom() {
 #[test]
 fn test_pot_tracks_bets() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 1,
-    })
-    .unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 2,
-    })
-    .unwrap();
+    deal_cards(&mut game);
 
     assert!(game.pot_total() > 0);
 
     let active = game.active_player().unwrap();
-    game.player_action(active, PlayerAction::Call).unwrap();
+    game.game_response(active, PlayerAction::Call).unwrap();
     let other = if active == 1 { 2 } else { 1 };
-    game.player_action(other, PlayerAction::Check).unwrap();
+    game.game_response(other, PlayerAction::Check).unwrap();
 
     assert!(game.pot_total() > 150);
 }
@@ -686,11 +617,7 @@ fn test_event_error() {
 #[test]
 fn test_hole_cards_dealt_event() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 1,
-    })
-    .unwrap();
+    deal_cards(&mut game);
     let p = game.all_players().iter().find(|p| p.id == 1).unwrap();
     assert!(p.is_active_in_hand());
 }
@@ -700,25 +627,13 @@ fn test_hole_cards_dealt_event() {
 #[test]
 fn test_three_player_two_fold() {
     let mut game = setup_three_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 1,
-    })
-    .unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 2,
-    })
-    .unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 3,
-    })
-    .unwrap();
+    deal_cards(&mut game);
 
     let active = game.active_player().unwrap();
-    game.player_action(active, PlayerAction::Fold).unwrap();
+    game.game_response(active, PlayerAction::Fold).unwrap();
 
     let active2 = game.active_player().unwrap();
-    game.player_action(active2, PlayerAction::Fold).unwrap();
+    game.game_response(active2, PlayerAction::Fold).unwrap();
 
     assert_eq!(game.phase(), GamePhase::GameOver);
 }
@@ -728,20 +643,12 @@ fn test_three_player_two_fold() {
 #[test]
 fn test_all_in_less_than_current_bet() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 1,
-    })
-    .unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt {
-        player_id: 2,
-    })
-    .unwrap();
+    deal_cards(&mut game);
 
     let active = game.active_player().unwrap();
-    game.player_action(active, PlayerAction::AllIn).unwrap();
+    game.game_response(active, PlayerAction::AllIn).unwrap();
     let other = if active == 1 { 2 } else { 1 };
-    game.player_action(other, PlayerAction::Call).unwrap();
+    game.game_response(other, PlayerAction::Call).unwrap();
 
     assert_eq!(game.phase(), GamePhase::Flop);
 }
@@ -753,11 +660,9 @@ fn test_new_player_sb_in_heads_up() {
     let mut game = setup_two_player_game();
 
     // Play first hand to completion
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+    deal_cards(&mut game);
     let active = game.active_player().unwrap();
-    game.player_action(active, PlayerAction::Fold).unwrap();
+    game.game_response(active, PlayerAction::Fold).unwrap();
     assert_eq!(game.phase(), GamePhase::GameOver);
 
     // Add third player — n=2→3, new player gets SB
@@ -781,14 +686,11 @@ fn test_new_player_bb_with_three_players() {
     let mut game = setup_three_player_game();
 
     // Play first hand to completion
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 3 }).unwrap();
+    deal_cards(&mut game);
     let active = game.active_player().unwrap();
-    game.player_action(active, PlayerAction::Fold).unwrap();
+    game.game_response(active, PlayerAction::Fold).unwrap();
     let active2 = game.active_player().unwrap();
-    game.player_action(active2, PlayerAction::Fold).unwrap();
+    game.game_response(active2, PlayerAction::Fold).unwrap();
     assert_eq!(game.phase(), GamePhase::GameOver);
 
     // Add fourth player — n=3→4, new player gets BB
@@ -805,11 +707,9 @@ fn test_normal_rotation_after_new_player() {
     let mut game = setup_two_player_game();
 
     // Play hand 1
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+    deal_cards(&mut game);
     let active = game.active_player().unwrap();
-    game.player_action(active, PlayerAction::Fold).unwrap();
+    game.game_response(active, PlayerAction::Fold).unwrap();
 
     // Add player 3 — gets SB
     game.add_player(3, 500).unwrap();
@@ -824,13 +724,11 @@ fn test_normal_rotation_after_new_player() {
     assert_eq!(sb.id, 3, "player 3 should be SB");
 
     // Play to completion
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 3 }).unwrap();
+    deal_cards(&mut game);
     let a = game.active_player().unwrap();
-    game.player_action(a, PlayerAction::Fold).unwrap();
+    game.game_response(a, PlayerAction::Fold).unwrap();
     let a2 = game.active_player().unwrap();
-    game.player_action(a2, PlayerAction::Fold).unwrap();
+    game.game_response(a2, PlayerAction::Fold).unwrap();
     assert_eq!(game.phase(), GamePhase::GameOver);
 
     // Hand 3 — normal rotation
@@ -842,17 +740,19 @@ fn test_normal_rotation_after_new_player() {
 // === Blind skipping for busted players ===
 
 fn bust_player(game: &mut Game, loser_id: PlayerId) {
-    game.start_hand().unwrap();
-    let ids: Vec<PlayerId> = game.all_players().iter()
-        .filter(|p| p.status == PlayerStatus::Active && p.chips > 0)
-        .map(|p| p.id)
-        .collect();
-    for id in &ids {
-        game.handle_event(GameEvent::HoleCardsDealt { player_id: *id }).unwrap();
+    let resp = game.start_hand().unwrap();
+    match resp {
+        GameResponse::DealerCommand(GameCommand::DealHoleCards { player_ids }) => {
+            for id in &player_ids {
+                game.handle_event(GameEvent::HoleCardsDealt { player_id: *id })
+                    .unwrap();
+            }
+        }
+        _ => panic!("expected DealHoleCards"),
     }
     // Everyone goes all-in
     while let Some(id) = game.active_player() {
-        game.player_action(id, PlayerAction::AllIn).unwrap();
+        game.game_response(id, PlayerAction::AllIn).unwrap();
     }
     // Process auto-advance through community cards to showdown
     while game.phase() != GamePhase::Showdown && game.phase() != GamePhase::GameOver {
@@ -995,18 +895,15 @@ fn test_three_player_allin_different_stacks() {
     game.add_player(2, 1000).unwrap();
     game.add_player(3, 1000).unwrap();
 
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 3 }).unwrap();
+    deal_cards(&mut game);
 
     // All three go all-in
     let a = game.active_player().unwrap();
-    game.player_action(a, PlayerAction::AllIn).unwrap();
+    game.game_response(a, PlayerAction::AllIn).unwrap();
     let a = game.active_player().unwrap();
-    game.player_action(a, PlayerAction::AllIn).unwrap();
+    game.game_response(a, PlayerAction::AllIn).unwrap();
     let a = game.active_player().unwrap();
-    game.player_action(a, PlayerAction::AllIn).unwrap();
+    game.game_response(a, PlayerAction::AllIn).unwrap();
 
     // Auto-advance to showdown
     while game.phase() != GamePhase::Showdown && game.phase() != GamePhase::GameOver {
@@ -1046,17 +943,14 @@ fn test_three_player_allin_pot_total() {
     game.add_player(2, 1000).unwrap();
     game.add_player(3, 1000).unwrap();
 
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 3 }).unwrap();
+    deal_cards(&mut game);
 
     let a = game.active_player().unwrap();
-    game.player_action(a, PlayerAction::AllIn).unwrap();
+    game.game_response(a, PlayerAction::AllIn).unwrap();
     let a = game.active_player().unwrap();
-    game.player_action(a, PlayerAction::AllIn).unwrap();
+    game.game_response(a, PlayerAction::AllIn).unwrap();
     let a = game.active_player().unwrap();
-    game.player_action(a, PlayerAction::AllIn).unwrap();
+    game.game_response(a, PlayerAction::AllIn).unwrap();
 
     while game.phase() != GamePhase::Showdown && game.phase() != GamePhase::GameOver {
         let _ = game.handle_event(GameEvent::CommunityCardsRevealed);
@@ -1079,71 +973,60 @@ fn test_three_player_allin_pot_total() {
     assert_eq!(p3.chips, 0);
 }
 
-// === PlayerActions tests ===
+// === GameResponse PlayerTurn / AvailableAction tests ===
 
 #[test]
 fn test_player_actions_preflop_sb() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+    deal_cards(&mut game);
 
     let active = game.active_player().unwrap();
-    let actions = game.player_actions(active).unwrap();
-
-    assert!(actions.can_fold);
-    assert!(!actions.can_check, "SB must call or raise pre-flop");
-    assert!(actions.can_call);
-    assert_eq!(actions.call_amount, 50); // SB posted 50, needs 50 more to match BB
-    assert!(actions.can_raise);
-    assert_eq!(actions.min_raise, 100);
-    assert_eq!(actions.max_raise, 900); // 950 chips left - 50 to call
-    assert!(actions.can_all_in);
-    assert_eq!(actions.all_in_amount, 950); // 1000 - 50 blind
+    // SB must call or raise pre-flop (can't check)
+    assert!(game.game_response(active, PlayerAction::Check).is_err());
+    // SB can call
+    let resp = game.game_response(active, PlayerAction::Call).unwrap();
+    // After SB calls, BB gets a PlayerTurn with Fold and Check available
+    match resp {
+        GameResponse::PlayerTurn { player_id: _, actions } => {
+            assert!(actions.contains(&AvailableAction::Fold));
+            assert!(actions.contains(&AvailableAction::Check));
+        }
+        _ => panic!("expected PlayerTurn"),
+    }
 }
 
 #[test]
 fn test_player_actions_preflop_bb_can_check() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+    deal_cards(&mut game);
 
     // SB calls
     let active = game.active_player().unwrap();
-    game.player_action(active, PlayerAction::Call).unwrap();
+    let resp = game.game_response(active, PlayerAction::Call).unwrap();
 
     // BB's turn — can check
-    let bb = game.active_player().unwrap();
-    let actions = game.player_actions(bb).unwrap();
-
-    assert!(actions.can_check);
-    assert!(!actions.can_call);
-    assert!(actions.call_amount == 0);
+    let (bb_id, actions) = get_player_turn(&resp);
+    assert_eq!(bb_id, game.active_player().unwrap());
+    assert!(actions.contains(&AvailableAction::Check));
+    assert!(!actions.iter().any(|a| matches!(a, AvailableAction::Call(_))));
 }
 
 #[test]
 fn test_player_actions_after_raise() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+    deal_cards(&mut game);
 
     // In heads-up: P1=dealer=BB, P2=SB. SB acts first.
     // SB raises to 200 (Raise(100))
     let sb = game.active_player().unwrap();
-    game.player_action(sb, PlayerAction::Raise(100)).unwrap();
+    let resp = game.game_response(sb, PlayerAction::Raise(100)).unwrap();
 
     // BB's turn — must call or re-raise
-    let bb = game.active_player().unwrap();
-    let actions = game.player_actions(bb).unwrap();
-
-    assert!(!actions.can_check);
-    assert!(actions.can_call);
-    assert_eq!(actions.call_amount, 100); // BB posted 100, needs 100 more to match 200
-    assert!(actions.can_raise);
-    assert_eq!(actions.min_raise, 100);
-    assert_eq!(actions.max_raise, 800); // 900 chips left - 100 to call
+    let (bb_id, actions) = get_player_turn(&resp);
+    assert_eq!(bb_id, game.active_player().unwrap());
+    assert!(!actions.contains(&AvailableAction::Check));
+    assert!(actions.iter().any(|a| matches!(a, AvailableAction::Call(_))));
+    assert!(actions.iter().any(|a| matches!(a, AvailableAction::Raise(_))));
 }
 
 #[test]
@@ -1151,21 +1034,28 @@ fn test_player_actions_call_not_enough_to_raise() {
     let mut game = Game::new(GameConfig::default());
     game.add_player(1, 10000).unwrap();
     game.add_player(2, 150).unwrap(); // SB has 150
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+    let resp = game.start_hand().unwrap();
+    let mut last_resp = GameResponse::GameOver;
+    match resp {
+        GameResponse::DealerCommand(GameCommand::DealHoleCards { player_ids }) => {
+            for id in player_ids {
+                last_resp = game.handle_event(GameEvent::HoleCardsDealt { player_id: id }).unwrap();
+            }
+        }
+        _ => panic!("expected DealHoleCards"),
+    }
 
     // P2=SB posted 50, has 100 chips left, needs 50 to match BB
     // Can call (50) but after that only 50 left — not enough to raise (min 100)
-    let sb = game.active_player().unwrap();
-    let actions = game.player_actions(sb).unwrap();
+    let actions = match last_resp {
+        GameResponse::PlayerTurn { actions, .. } => actions,
+        other => panic!("expected PlayerTurn, got {:?}", other),
+    };
 
-    assert!(actions.can_call);
-    assert_eq!(actions.call_amount, 50);
-    assert!(!actions.can_raise, "50 left after call < min raise of 100");
-    assert_eq!(actions.max_raise, 50); // 100 chips - 50 to call
-    assert!(actions.can_all_in);
-    assert_eq!(actions.all_in_amount, 100); // 150 - 50 blind
+    assert!(actions.iter().any(|a| matches!(a, AvailableAction::Call(_))));
+    assert!(!actions.iter().any(|a| matches!(a, AvailableAction::Raise(_))),
+        "50 left after call < min raise of 100");
+    assert!(actions.iter().any(|a| matches!(a, AvailableAction::AllIn(_))));
 }
 
 #[test]
@@ -1173,13 +1063,17 @@ fn test_player_actions_all_in_on_blind() {
     let mut game = Game::new(GameConfig::default());
     game.add_player(1, 50).unwrap(); // SB has exactly 50 — posts all-in on blind
     game.add_player(2, 10000).unwrap();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+    let resp = game.start_hand().unwrap();
+    match resp {
+        GameResponse::DealerCommand(GameCommand::DealHoleCards { player_ids }) => {
+            for id in player_ids {
+                game.handle_event(GameEvent::HoleCardsDealt { player_id: id }).unwrap();
+            }
+        }
+        _ => panic!("expected DealHoleCards"),
+    }
 
     // SB is all-in from blind — cannot act further
-    let _sb = game.active_player().unwrap();
-    // SB went all-in posting the blind, so they can't act
     let p1 = game.all_players().iter().find(|p| p.id == 1).unwrap();
     assert!(p1.all_in);
 }
@@ -1187,55 +1081,52 @@ fn test_player_actions_all_in_on_blind() {
 #[test]
 fn test_player_actions_none_for_wrong_player() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+    deal_cards(&mut game);
 
     let active = game.active_player().unwrap();
     let other = if active == 1 { 2 } else { 1 };
-    assert!(game.player_actions(other).is_none());
+    assert!(game.game_response(other, PlayerAction::Check).is_err());
 }
 
 #[test]
 fn test_player_actions_none_when_not_started() {
-    let game = setup_two_player_game();
-    assert!(game.player_actions(1).is_none());
+    let mut game = setup_two_player_game();
+    assert!(game.game_response(1, PlayerAction::Check).is_err());
 }
 
 #[test]
 fn test_player_actions_none_when_all_in() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+    deal_cards(&mut game);
 
     // SB goes all-in
     let sb = game.active_player().unwrap();
-    game.player_action(sb, PlayerAction::AllIn).unwrap();
+    game.game_response(sb, PlayerAction::AllIn).unwrap();
 
-    // SB already acted and is all-in — actions should be None
-    assert!(game.player_actions(sb).is_none());
+    // SB already acted and is all-in — can't act again
+    assert!(game.game_response(sb, PlayerAction::Check).is_err());
 }
 
 #[test]
 fn test_player_actions_check_available_postflop() {
     let mut game = setup_two_player_game();
-    game.start_hand().unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
-    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+    deal_cards(&mut game);
 
     // Both call preflop
     let a = game.active_player().unwrap();
-    game.player_action(a, PlayerAction::Call).unwrap();
+    let _resp = game.game_response(a, PlayerAction::Call).unwrap();
     let b = game.active_player().unwrap();
-    game.player_action(b, PlayerAction::Check).unwrap();
+    let _resp = game.game_response(b, PlayerAction::Check).unwrap();
 
     // Flop
     game.handle_event(GameEvent::CommunityCardsRevealed).unwrap();
 
-    // Both can check
+    // Both can check — the active player gets a PlayerTurn response
     let a = game.active_player().unwrap();
-    let actions = game.player_actions(a).unwrap();
-    assert!(actions.can_check);
-    assert!(!actions.can_call);
+    let actions = match game.game_response(a, PlayerAction::Check).unwrap() {
+        GameResponse::PlayerTurn { actions, .. } => actions,
+        other => panic!("expected PlayerTurn, got {:?}", other),
+    };
+    assert!(actions.contains(&AvailableAction::Check));
+    assert!(!actions.iter().any(|a| matches!(a, AvailableAction::Call(_))));
 }

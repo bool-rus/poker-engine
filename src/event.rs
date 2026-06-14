@@ -10,22 +10,23 @@ use crate::hand::HandScore;
 /// # Examples
 ///
 /// ```rust
-/// use poker_engine::{Game, GameConfig, GameEvent, PlayerAction};
+/// use poker_engine::{Game, GameConfig, GameEvent, PlayerAction, GameResponse, GameCommand};
 ///
 /// let mut game = Game::new(GameConfig::default());
 /// game.add_player(1, 10000).unwrap();
 /// game.add_player(2, 10000).unwrap();
-/// game.start_hand().unwrap();
-///
-/// // Dealer confirms cards were dealt
-/// game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
-/// game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+/// let resp = game.start_hand().unwrap();
+/// if let GameResponse::DealerCommand(GameCommand::DealHoleCards { player_ids }) = resp {
+///     for id in player_ids {
+///         game.handle_event(GameEvent::HoleCardsDealt { player_id: id }).unwrap();
+///     }
+/// }
 ///
 /// // Preflop betting
 /// let active = game.active_player().unwrap();
-/// game.player_action(active, PlayerAction::Call).unwrap();
+/// game.game_response(active, PlayerAction::Call).unwrap();
 /// let other = if active == 1 { 2 } else { 1 };
-/// game.player_action(other, PlayerAction::Check).unwrap();
+/// game.game_response(other, PlayerAction::Check).unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub enum GameEvent {
