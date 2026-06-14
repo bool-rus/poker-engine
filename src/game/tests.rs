@@ -849,3 +849,255 @@ fn test_normal_rotation_after_new_player() {
     let total_bets: u64 = game.all_players().iter().map(|p| p.bet).sum();
     assert_eq!(total_bets, game.config().small_blind + game.config().big_blind);
 }
+
+// === Blind skipping for busted players ===
+
+fn bust_player(game: &mut Game, loser_id: PlayerId) {
+    game.start_hand().unwrap();
+    let ids: Vec<PlayerId> = game.all_players().iter()
+        .filter(|p| p.status == PlayerStatus::Active && p.chips > 0)
+        .map(|p| p.id)
+        .collect();
+    for id in &ids {
+        game.handle_event(GameEvent::HoleCardsDealt { player_id: *id }).unwrap();
+    }
+    // Everyone goes all-in
+    while let Some(id) = game.active_player() {
+        game.player_action(id, PlayerAction::AllIn).unwrap();
+    }
+    // Process auto-advance through community cards to showdown
+    while game.phase() != GamePhase::Showdown && game.phase() != GamePhase::GameOver {
+        let _ = game.handle_event(GameEvent::CommunityCardsRevealed);
+    }
+    if game.phase() == GamePhase::Showdown {
+        let showdown_ids: Vec<PlayerId> = game.all_players().iter()
+            .filter(|p| p.is_active_in_hand())
+            .map(|p| p.id)
+            .collect();
+        for id in &showdown_ids {
+            let score = if *id == loser_id { 0 } else { 200 };
+            game.handle_event(GameEvent::PlayerCardsRevealed { player_id: *id, score }).unwrap();
+        }
+    }
+}
+
+#[test]
+fn test_skip_busted_player_for_blinds() {
+    let mut game = Game::new(GameConfig {
+        small_blind: 50,
+        big_blind: 100,
+        starting_chips: 100,
+        max_players: 9,
+        min_players: 2,
+        allow_rebuy: false,
+        rebuy_amount: None,
+    });
+    game.add_player(1).unwrap();
+    game.add_player(2).unwrap();
+    game.add_player(3).unwrap();
+
+    bust_player(&mut game, 3);
+
+    let p3 = game.all_players().iter().find(|p| p.id == 3).unwrap();
+    assert_eq!(p3.chips, 0);
+
+    game.start_hand().unwrap();
+
+    let p3 = game.all_players().iter().find(|p| p.id == 3).unwrap();
+    assert_eq!(p3.bet, 0, "busted player should not post blind");
+    assert!(!p3.is_dealer, "busted player should not be dealer");
+
+    let active = game.active_player().unwrap();
+    assert_ne!(active, 3, "busted player should not be first to act");
+}
+
+#[test]
+fn test_all_in_posting_when_chips_less_than_blind() {
+    let mut game = Game::new(GameConfig {
+        small_blind: 50,
+        big_blind: 100,
+        starting_chips: 100,
+        max_players: 9,
+        min_players: 2,
+        allow_rebuy: true,
+        rebuy_amount: Some(100),
+    });
+    game.add_player(1).unwrap();
+    game.add_player(2).unwrap();
+
+    bust_player(&mut game, 2);
+
+    assert_eq!(game.all_players().iter().find(|p| p.id == 2).unwrap().chips, 0);
+
+    game.rebuy(2, 30).unwrap();
+    assert_eq!(game.all_players().iter().find(|p| p.id == 2).unwrap().chips, 30);
+
+    game.start_hand().unwrap();
+
+    let p2 = game.all_players().iter().find(|p| p.id == 2).unwrap();
+    assert_eq!(p2.bet, 30, "player with less than blind posts all-in");
+    assert!(p2.all_in);
+}
+
+#[test]
+fn test_two_eligible_three_total_blinds() {
+    let mut game = Game::new(GameConfig {
+        small_blind: 50,
+        big_blind: 100,
+        starting_chips: 100,
+        max_players: 9,
+        min_players: 2,
+        allow_rebuy: false,
+        rebuy_amount: None,
+    });
+    game.add_player(1).unwrap();
+    game.add_player(2).unwrap();
+    game.add_player(3).unwrap();
+
+    bust_player(&mut game, 3);
+
+    assert_eq!(game.all_players().iter().find(|p| p.id == 3).unwrap().chips, 0);
+
+    game.start_hand().unwrap();
+
+    let p3 = game.all_players().iter().find(|p| p.id == 3).unwrap();
+    assert_eq!(p3.bet, 0);
+
+    let total_bets: u64 = game.all_players().iter()
+        .filter(|p| p.status == PlayerStatus::Active && p.chips > 0)
+        .map(|p| p.bet)
+        .sum();
+    assert_eq!(total_bets, game.config().small_blind + game.config().big_blind);
+}
+
+#[test]
+fn test_heads_up_when_third_player_busted() {
+    let mut game = Game::new(GameConfig {
+        small_blind: 50,
+        big_blind: 100,
+        starting_chips: 100,
+        max_players: 9,
+        min_players: 2,
+        allow_rebuy: false,
+        rebuy_amount: None,
+    });
+    game.add_player(1).unwrap();
+    game.add_player(2).unwrap();
+    game.add_player(3).unwrap();
+
+    bust_player(&mut game, 3);
+
+    assert_eq!(game.all_players().iter().find(|p| p.id == 3).unwrap().chips, 0);
+
+    game.start_hand().unwrap();
+
+    let active = game.active_player().unwrap();
+    let sb = game.all_players().iter()
+        .find(|p| p.bet == game.config().small_blind)
+        .unwrap();
+    assert_eq!(active, sb.id, "SB should act first in heads-up");
+}
+
+// === Multi-player all-in showdown with different stacks ===
+
+#[test]
+fn test_three_player_allin_different_stacks() {
+    let config = GameConfig {
+        small_blind: 50,
+        big_blind: 100,
+        starting_chips: 1000,
+        max_players: 9,
+        min_players: 2,
+        allow_rebuy: false,
+        rebuy_amount: None,
+    };
+    let mut game = Game::new(config);
+    game.add_player(1).unwrap();
+    game.add_player(2).unwrap();
+    game.add_player(3).unwrap();
+
+    game.start_hand().unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 3 }).unwrap();
+
+    // All three go all-in
+    let a = game.active_player().unwrap();
+    game.player_action(a, PlayerAction::AllIn).unwrap();
+    let a = game.active_player().unwrap();
+    game.player_action(a, PlayerAction::AllIn).unwrap();
+    let a = game.active_player().unwrap();
+    game.player_action(a, PlayerAction::AllIn).unwrap();
+
+    // Auto-advance to showdown
+    while game.phase() != GamePhase::Showdown && game.phase() != GamePhase::GameOver {
+        let _ = game.handle_event(GameEvent::CommunityCardsRevealed);
+    }
+    assert_eq!(game.phase(), GamePhase::Showdown);
+
+    let pot_before = game.pot_total();
+
+    // Showdown — player 3 wins (highest score)
+    game.handle_event(GameEvent::PlayerCardsRevealed { player_id: 1, score: 100 }).unwrap();
+    game.handle_event(GameEvent::PlayerCardsRevealed { player_id: 2, score: 200 }).unwrap();
+    game.handle_event(GameEvent::PlayerCardsRevealed { player_id: 3, score: 300 }).unwrap();
+
+    assert_eq!(game.phase(), GamePhase::GameOver);
+
+    let p3 = game.all_players().iter().find(|p| p.id == 3).unwrap();
+    assert_eq!(p3.chips, pot_before, "winner takes the entire pot");
+
+    let p1 = game.all_players().iter().find(|p| p.id == 1).unwrap();
+    let p2 = game.all_players().iter().find(|p| p.id == 2).unwrap();
+    assert_eq!(p1.chips, 0);
+    assert_eq!(p2.chips, 0);
+}
+
+#[test]
+fn test_three_player_allin_pot_total() {
+    let config = GameConfig {
+        small_blind: 50,
+        big_blind: 100,
+        starting_chips: 1000,
+        max_players: 9,
+        min_players: 2,
+        allow_rebuy: false,
+        rebuy_amount: None,
+    };
+    let mut game = Game::new(config);
+    game.add_player(1).unwrap();
+    game.add_player(2).unwrap();
+    game.add_player(3).unwrap();
+
+    game.start_hand().unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 3 }).unwrap();
+
+    let a = game.active_player().unwrap();
+    game.player_action(a, PlayerAction::AllIn).unwrap();
+    let a = game.active_player().unwrap();
+    game.player_action(a, PlayerAction::AllIn).unwrap();
+    let a = game.active_player().unwrap();
+    game.player_action(a, PlayerAction::AllIn).unwrap();
+
+    while game.phase() != GamePhase::Showdown && game.phase() != GamePhase::GameOver {
+        let _ = game.handle_event(GameEvent::CommunityCardsRevealed);
+    }
+
+    // Pot should be 3000 (3 × 1000)
+    assert_eq!(game.pot_total(), 3000);
+
+    // Player 2 wins
+    game.handle_event(GameEvent::PlayerCardsRevealed { player_id: 1, score: 100 }).unwrap();
+    game.handle_event(GameEvent::PlayerCardsRevealed { player_id: 2, score: 300 }).unwrap();
+    game.handle_event(GameEvent::PlayerCardsRevealed { player_id: 3, score: 200 }).unwrap();
+
+    let p2 = game.all_players().iter().find(|p| p.id == 2).unwrap();
+    assert_eq!(p2.chips, 3000, "winner takes entire pot");
+
+    let p1 = game.all_players().iter().find(|p| p.id == 1).unwrap();
+    let p3 = game.all_players().iter().find(|p| p.id == 3).unwrap();
+    assert_eq!(p1.chips, 0);
+    assert_eq!(p3.chips, 0);
+}
