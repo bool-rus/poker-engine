@@ -136,7 +136,7 @@ game.rebuy(1, 5000)?;          // Add chips (up to rebuy_amount)
 ## Testing
 
 ```bash
-cargo test          # Run all tests (61 unit + 13 doc tests)
+cargo test          # Run all tests (63 unit + 13 doc tests)
 cargo test --doc    # Run doc tests only
 ```
 
