@@ -72,6 +72,60 @@ game.handle_event(GameEvent::PlayerCardsRevealed { player_id: 2, score: 800 }).u
 assert_eq!(game.phase(), poker_engine::GamePhase::GameOver);
 ```
 
+## All-in Showdown
+
+When all players go all-in, the engine auto-advances through community card phases to showdown:
+
+```rust
+use poker_engine::{Game, GameConfig, PlayerAction, GameEvent};
+
+let config = GameConfig {
+    small_blind: 50,
+    big_blind: 100,
+    starting_chips: 1000,
+    max_players: 9,
+    min_players: 2,
+    allow_rebuy: false,
+    rebuy_amount: None,
+};
+
+let mut game = Game::new(config);
+game.add_player(1).unwrap();
+game.add_player(2).unwrap();
+game.add_player(3).unwrap();
+
+// --- Pre-flop: all players go all-in ---
+game.start_hand().unwrap();
+game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
+game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+game.handle_event(GameEvent::HoleCardsDealt { player_id: 3 }).unwrap();
+
+let a = game.active_player().unwrap();
+game.player_action(a, PlayerAction::AllIn).unwrap();
+let a = game.active_player().unwrap();
+game.player_action(a, PlayerAction::AllIn).unwrap();
+let a = game.active_player().unwrap();
+game.player_action(a, PlayerAction::AllIn).unwrap();
+
+// --- Auto-advance: engine skips Flop/Turn/River, goes straight to Showdown ---
+while game.phase() != poker_engine::GamePhase::Showdown
+    && game.phase() != poker_engine::GamePhase::GameOver
+{
+    let _ = game.handle_event(GameEvent::CommunityCardsRevealed);
+}
+assert_eq!(game.phase(), poker_engine::GamePhase::Showdown);
+assert_eq!(game.pot_total(), 3000); // 3 × 1000 chips
+
+// --- Showdown: dealer sends scores, winner takes the pot ---
+game.handle_event(GameEvent::PlayerCardsRevealed { player_id: 1, score: 100 }).unwrap();
+game.handle_event(GameEvent::PlayerCardsRevealed { player_id: 2, score: 200 }).unwrap();
+game.handle_event(GameEvent::PlayerCardsRevealed { player_id: 3, score: 300 }).unwrap();
+assert_eq!(game.phase(), poker_engine::GamePhase::GameOver);
+
+let winner = game.all_players().iter().find(|p| p.id == 3).unwrap();
+assert_eq!(winner.chips, 3000); // player 3 wins the entire pot
+```
+
 ## Game Flow
 
 ```
