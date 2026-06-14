@@ -25,8 +25,8 @@
 //! use poker_engine::{Game, GameConfig, PlayerAction, GameCommand, GameEvent};
 //!
 //! let mut game = Game::new(GameConfig::default());
-//! game.add_player(1).unwrap();
-//! game.add_player(2).unwrap();
+//! game.add_player(1, 10000).unwrap();
+//! game.add_player(2, 10000).unwrap();
 //!
 //! // --- Pre-flop ---
 //! let cmds = game.start_hand().unwrap();
@@ -86,7 +86,7 @@ pub mod game;
 pub use error::{PokerError, PlayerId};
 pub use hand::HandScore;
 pub use player::{PlayerState, PlayerStatus};
-pub use command::{GameCommand, PlayerAction};
+pub use command::{GameCommand, PlayerAction, PlayerActions};
 pub use event::GameEvent;
 pub use pot::Pot;
 pub use game::{Game, GameConfig, GamePhase};

@@ -1,7 +1,7 @@
 use crate::error::{PokerError, PlayerId};
 use crate::hand::HandScore;
 use crate::player::{PlayerState, PlayerStatus};
-use crate::command::{GameCommand, PlayerAction};
+use crate::command::{GameCommand, PlayerAction, PlayerActions};
 use crate::event::GameEvent;
 use crate::pot::Pot;
 
@@ -43,11 +43,9 @@ pub enum GamePhase {
 /// let config = GameConfig {
 ///     small_blind: 25,
 ///     big_blind: 50,
-///     starting_chips: 5000,
 ///     max_players: 6,
 ///     min_players: 2,
 ///     allow_rebuy: true,
-///     rebuy_amount: Some(5000),
 /// };
 /// assert_eq!(config.big_blind, 50);
 /// ```
@@ -57,16 +55,12 @@ pub struct GameConfig {
     pub small_blind: u64,
     /// Big blind amount.
     pub big_blind: u64,
-    /// Starting chips for each player.
-    pub starting_chips: u64,
     /// Maximum number of players at the table.
     pub max_players: usize,
     /// Minimum number of players to start a hand.
     pub min_players: usize,
     /// Whether rebuys are allowed.
     pub allow_rebuy: bool,
-    /// Maximum rebuy amount (None = starting_chips).
-    pub rebuy_amount: Option<u64>,
 }
 
 impl Default for GameConfig {
@@ -74,11 +68,9 @@ impl Default for GameConfig {
         Self {
             small_blind: 50,
             big_blind: 100,
-            starting_chips: 10000,
             max_players: 9,
             min_players: 2,
             allow_rebuy: true,
-            rebuy_amount: None,
         }
     }
 }
@@ -105,8 +97,8 @@ impl Default for GameConfig {
 /// use poker_engine::{Game, GameConfig, PlayerAction, GameEvent};
 ///
 /// let mut game = Game::new(GameConfig::default());
-/// game.add_player(1).unwrap();
-/// game.add_player(2).unwrap();
+/// game.add_player(1, 10000).unwrap();
+/// game.add_player(2, 10000).unwrap();
 ///
 /// // Start hand — get commands for dealer
 /// let cmds = game.start_hand().unwrap();
@@ -163,7 +155,7 @@ impl Game {
         }
     }
 
-    /// Add a player to the table.
+    /// Add a player to the table with the given chip stack.
     ///
     /// Can be called between hands or during an active game. When added mid-game,
     /// the player sits at the table without cards and receives cards on the next deal.
@@ -176,7 +168,7 @@ impl Game {
     ///
     /// Returns [`PokerError::PlayerAlreadyAtTable`] if the player is already seated.
     /// Returns [`PokerError::TableFull`] if the table is at capacity.
-    pub fn add_player(&mut self, player_id: PlayerId) -> Result<(), PokerError> {
+    pub fn add_player(&mut self, player_id: PlayerId, chips: u64) -> Result<(), PokerError> {
         if self.players.iter().any(|p| p.id == player_id) {
             return Err(PokerError::PlayerAlreadyAtTable(player_id));
         }
@@ -188,7 +180,7 @@ impl Game {
 
         let in_progress = self.phase != GamePhase::WaitingToStart && self.phase != GamePhase::GameOver;
         let n = self.players.len();
-        let mut new_player = PlayerState::new(player_id, self.config.starting_chips);
+        let mut new_player = PlayerState::new(player_id, chips);
         if in_progress {
             new_player.status = PlayerStatus::SittingOut;
             new_player.wants_in = true;
@@ -278,8 +270,7 @@ impl Game {
             .find(|p| p.id == player_id)
             .ok_or(PokerError::PlayerNotFound(player_id))?;
 
-        let max_amount = self.config.rebuy_amount.unwrap_or(self.config.starting_chips);
-        if amount == 0 || player.chips + amount > max_amount {
+        if amount == 0 {
             return Err(PokerError::InvalidRebuy {
                 player: player_id,
                 amount,
@@ -780,6 +771,44 @@ impl Game {
     /// ID of the player who should act next, or None if no one is acting.
     pub fn active_player(&self) -> Option<PlayerId> {
         self.acting_index.map(|i| self.players[i].id)
+    }
+
+    /// Returns the set of actions available to the specified player.
+    ///
+    /// Returns `None` if the player is not the current actor (not their turn).
+    /// The returned struct tells the frontend/AI which actions are valid and
+    /// the relevant amounts (call, raise range, all-in).
+    pub fn player_actions(&self, player_id: PlayerId) -> Option<PlayerActions> {
+        let acting = self.acting_index?;
+        if self.players[acting].id != player_id {
+            return None;
+        }
+        if !self.players[acting].can_act() {
+            return None;
+        }
+
+        let p = &self.players[acting];
+        let call_needed = self.current_bet.saturating_sub(p.bet);
+        let has_bet_to_match = call_needed > 0;
+
+        let min_raise = self.config.big_blind;
+        let max_raise = p.chips.saturating_sub(call_needed);
+
+        let can_raise = p.chips >= call_needed + min_raise;
+
+        Some(PlayerActions {
+            player_id,
+            phase: self.phase,
+            can_fold: true,
+            can_check: !has_bet_to_match,
+            can_call: has_bet_to_match,
+            call_amount: call_needed.min(p.chips),
+            can_raise,
+            min_raise,
+            max_raise,
+            can_all_in: p.chips > 0,
+            all_in_amount: p.chips,
+        })
     }
 
     /// List of players still at the table (Active or SittingOut).

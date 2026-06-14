@@ -13,8 +13,8 @@ use crate::hand::HandScore;
 /// use poker_engine::{Game, GameConfig, GameEvent, PlayerAction};
 ///
 /// let mut game = Game::new(GameConfig::default());
-/// game.add_player(1).unwrap();
-/// game.add_player(2).unwrap();
+/// game.add_player(1, 10000).unwrap();
+/// game.add_player(2, 10000).unwrap();
 /// game.start_hand().unwrap();
 ///
 /// // Dealer confirms cards were dealt

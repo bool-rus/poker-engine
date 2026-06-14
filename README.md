@@ -23,8 +23,8 @@ The engine manages game state, betting rounds, pots, and player actions. Card de
 use poker_engine::{Game, GameConfig, PlayerAction, GameEvent};
 
 let mut game = Game::new(GameConfig::default());
-game.add_player(1).unwrap();
-game.add_player(2).unwrap();
+game.add_player(1, 10000).unwrap();
+game.add_player(2, 10000).unwrap();
 
 // --- Pre-flop ---
 let cmds = game.start_hand().unwrap();
@@ -34,23 +34,25 @@ let cmds = game.start_hand().unwrap();
 game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
 game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
 
-// player_action returns Vec<GameCommand> — commands for the dealer
+// Query available actions for the current player
 let active = game.active_player().unwrap();
+let actions = game.player_actions(active).unwrap();
+assert!(actions.can_call);
+assert!(actions.can_raise);
+
+// Execute action
 let other = if active == 1 { 2 } else { 1 };
-let cmds = game.player_action(active, PlayerAction::Call).unwrap();
-// cmds: [] — no dealer action needed yet
+game.player_action(active, PlayerAction::Call).unwrap();
 let cmds = game.player_action(other, PlayerAction::Check).unwrap();
 // cmds: [RevealCommunityCards{count: 3}] — dealer should reveal the flop
 assert_eq!(game.phase(), poker_engine::GamePhase::Flop);
 
 // --- Flop ---
-// Send RevealCommunityCards result back to engine
 game.handle_event(GameEvent::CommunityCardsRevealed).unwrap();
 let a = game.active_player().unwrap();
 let o = if a == 1 { 2 } else { 1 };
 game.player_action(a, PlayerAction::Check).unwrap();
 let cmds = game.player_action(o, PlayerAction::Check).unwrap();
-// cmds: [RevealCommunityCards{count: 1}] — dealer should reveal the turn
 assert_eq!(game.phase(), poker_engine::GamePhase::Turn);
 
 // --- Turn ---
@@ -59,7 +61,6 @@ let a = game.active_player().unwrap();
 let o = if a == 1 { 2 } else { 1 };
 game.player_action(a, PlayerAction::Check).unwrap();
 let cmds = game.player_action(o, PlayerAction::Check).unwrap();
-// cmds: [RevealCommunityCards{count: 1}] — dealer should reveal the river
 assert_eq!(game.phase(), poker_engine::GamePhase::River);
 
 // --- River ---
@@ -68,14 +69,43 @@ let a = game.active_player().unwrap();
 let o = if a == 1 { 2 } else { 1 };
 game.player_action(a, PlayerAction::Check).unwrap();
 let cmds = game.player_action(o, PlayerAction::Check).unwrap();
-// cmds: [RevealPlayerCards{player_id: 1}, RevealPlayerCards{player_id: 2}]
 assert_eq!(game.phase(), poker_engine::GamePhase::Showdown);
 
 // --- Showdown ---
-// Dealer evaluates hands and sends scores
 game.handle_event(GameEvent::PlayerCardsRevealed { player_id: 1, score: 500 }).unwrap();
 game.handle_event(GameEvent::PlayerCardsRevealed { player_id: 2, score: 800 }).unwrap();
 assert_eq!(game.phase(), poker_engine::GamePhase::GameOver);
+```
+
+## Available Actions
+
+Query what actions are valid for the current player:
+
+```rust
+use poker_engine::{Game, GameConfig, PlayerAction, GameEvent};
+
+let mut game = Game::new(GameConfig::default());
+game.add_player(1, 10000).unwrap();
+game.add_player(2, 10000).unwrap();
+game.start_hand().unwrap();
+game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
+game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+
+let active = game.active_player().unwrap();
+let actions = game.player_actions(active).unwrap();
+
+// Check what's available
+assert!(actions.can_fold);
+assert!(!actions.can_check);   // must call or raise pre-flop
+assert!(actions.can_call);
+assert!(actions.call_amount <= 10000);
+assert!(actions.can_raise);
+assert!(actions.min_raise == 100);
+assert!(actions.can_all_in);
+
+// Player 2 (wrong turn) gets None
+let other = if active == 1 { 2 } else { 1 };
+assert!(game.player_actions(other).is_none());
 ```
 
 ## All-in Showdown
@@ -85,20 +115,17 @@ When all players go all-in, the engine auto-advances through community card phas
 ```rust
 use poker_engine::{Game, GameConfig, PlayerAction, GameEvent};
 
-let config = GameConfig {
+let mut game = Game::new(GameConfig {
     small_blind: 50,
     big_blind: 100,
-    starting_chips: 1000,
     max_players: 9,
     min_players: 2,
     allow_rebuy: false,
-    rebuy_amount: None,
-};
+});
 
-let mut game = Game::new(config);
-game.add_player(1).unwrap();
-game.add_player(2).unwrap();
-game.add_player(3).unwrap();
+game.add_player(1, 1000).unwrap();
+game.add_player(2, 1000).unwrap();
+game.add_player(3, 1000).unwrap();
 
 // --- Pre-flop: all players go all-in ---
 game.start_hand().unwrap();
@@ -120,7 +147,7 @@ while game.phase() != poker_engine::GamePhase::Showdown
     let _ = game.handle_event(GameEvent::CommunityCardsRevealed);
 }
 assert_eq!(game.phase(), poker_engine::GamePhase::Showdown);
-assert_eq!(game.pot_total(), 3000); // 3 × 1000 chips
+assert_eq!(game.pot_total(), 3000); // 3 x 1000 chips
 
 // --- Showdown: dealer sends scores, winner takes the pot ---
 game.handle_event(GameEvent::PlayerCardsRevealed { player_id: 1, score: 100 }).unwrap();
@@ -129,7 +156,7 @@ game.handle_event(GameEvent::PlayerCardsRevealed { player_id: 3, score: 300 }).u
 assert_eq!(game.phase(), poker_engine::GamePhase::GameOver);
 
 let winner = game.all_players().iter().find(|p| p.id == 3).unwrap();
-assert_eq!(winner.chips, 3000); // player 3 wins the entire pot
+assert_eq!(winner.chips, 3000);
 ```
 
 ## Game Flow
@@ -151,7 +178,8 @@ GameEvent::PlayerCardsRevealed   <── Dealer returns final scores
 - **Pot management** — main pot and side pots for multi-way all-in
 - **Dynamic players** — add/remove players between hands, sit out/in, rebuy
 - **Dealer rotation** — automatic dealer button movement between hands
-- **Configurable** — blinds, starting chips, min/max players, rebuy settings
+- **Available actions** — query valid actions with amounts for the current player
+- **Configurable** — blinds, min/max players, rebuy settings
 
 ## Configuration
 
@@ -161,22 +189,20 @@ use poker_engine::GameConfig;
 let config = GameConfig {
     small_blind: 25,
     big_blind: 50,
-    starting_chips: 5000,
     max_players: 6,
     min_players: 2,
     allow_rebuy: true,
-    rebuy_amount: Some(5000),
 };
 ```
 
 ## Player Management
 
 ```rust
-game.add_player(1)?;           // Add player with starting chips
-game.remove_player(1)?;        // Remove player between hands
-game.sit_out(1)?;              // Auto-fold until sit_in
-game.sit_in(1)?;               // Rejoin next hand
-game.rebuy(1, 5000)?;          // Add chips (up to rebuy_amount)
+game.add_player(1, 10000)?;     // Add player with chip stack
+game.remove_player(1)?;         // Remove player between hands
+game.sit_out(1)?;               // Auto-fold until sit_in
+game.sit_in(1)?;                // Rejoin next hand
+game.rebuy(1, 5000)?;           // Add chips
 ```
 
 ## API Reference
@@ -184,11 +210,12 @@ game.rebuy(1, 5000)?;          // Add chips (up to rebuy_amount)
 | Method | Description |
 |--------|-------------|
 | `Game::new(config)` | Create a new game |
-| `Game::add_player(id)` | Add player to table |
+| `Game::add_player(id, chips)` | Add player with chip stack |
 | `Game::remove_player(id)` | Remove player from table |
 | `Game::start_hand()` | Start a new hand, returns `Vec<GameCommand>` |
 | `Game::handle_event(event)` | Process dealer response |
 | `Game::player_action(id, action)` | Execute a player action |
+| `Game::player_actions(id)` | Get available actions for a player |
 | `Game::active_player()` | Get ID of player who should act |
 | `Game::phase()` | Current game phase |
 | `Game::pot_total()` | Total chips in the pot |
@@ -196,7 +223,7 @@ game.rebuy(1, 5000)?;          // Add chips (up to rebuy_amount)
 ## Testing
 
 ```bash
-cargo test          # Run all tests (63 unit + 13 doc tests)
+cargo test          # Run all tests (74 unit + 14 doc tests)
 cargo test --doc    # Run doc tests only
 ```
 

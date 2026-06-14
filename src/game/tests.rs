@@ -4,26 +4,26 @@ fn default_config() -> GameConfig {
     GameConfig {
         small_blind: 50,
         big_blind: 100,
-        starting_chips: 1000,
         max_players: 9,
         min_players: 2,
         allow_rebuy: true,
-        rebuy_amount: None,
     }
 }
 
+const DEFAULT_CHIPS: u64 = 1000;
+
 fn setup_two_player_game() -> Game {
     let mut game = Game::new(default_config());
-    game.add_player(1).unwrap();
-    game.add_player(2).unwrap();
+    game.add_player(1, DEFAULT_CHIPS).unwrap();
+    game.add_player(2, DEFAULT_CHIPS).unwrap();
     game
 }
 
 fn setup_three_player_game() -> Game {
     let mut game = Game::new(default_config());
-    game.add_player(1).unwrap();
-    game.add_player(2).unwrap();
-    game.add_player(3).unwrap();
+    game.add_player(1, DEFAULT_CHIPS).unwrap();
+    game.add_player(2, DEFAULT_CHIPS).unwrap();
+    game.add_player(3, DEFAULT_CHIPS).unwrap();
     game
 }
 
@@ -32,15 +32,15 @@ fn setup_three_player_game() -> Game {
 #[test]
 fn test_add_player() {
     let mut game = Game::new(default_config());
-    assert!(game.add_player(1).is_ok());
+    assert!(game.add_player(1, 500).is_ok());
     assert_eq!(game.players().len(), 1);
 }
 
 #[test]
 fn test_add_duplicate_player() {
     let mut game = Game::new(default_config());
-    game.add_player(1).unwrap();
-    assert_eq!(game.add_player(1), Err(PokerError::PlayerAlreadyAtTable(1)));
+    game.add_player(1, 500).unwrap();
+    assert_eq!(game.add_player(1, 500), Err(PokerError::PlayerAlreadyAtTable(1)));
 }
 
 #[test]
@@ -50,10 +50,10 @@ fn test_table_full() {
         ..default_config()
     };
     let mut game = Game::new(config);
-    game.add_player(1).unwrap();
-    game.add_player(2).unwrap();
+    game.add_player(1, 500).unwrap();
+    game.add_player(2, 500).unwrap();
     assert_eq!(
-        game.add_player(3),
+        game.add_player(3, 500),
         Err(PokerError::TableFull { max: 2 })
     );
 }
@@ -63,7 +63,7 @@ fn test_add_player_during_game() {
     let mut game = setup_two_player_game();
     game.start_hand().unwrap();
     // Adding a player during an active game is allowed — they sit without cards
-    assert!(game.add_player(3).is_ok());
+    assert!(game.add_player(3, 500).is_ok());
     let p3 = game.all_players().iter().find(|p| p.id == 3).unwrap();
     assert_eq!(p3.status, PlayerStatus::SittingOut);
     assert!(p3.wants_in);
@@ -77,7 +77,7 @@ fn test_add_player_during_game_no_cards_current_hand() {
     assert_eq!(cmds.len(), 2);
 
     // Add player 3 mid-game
-    game.add_player(3).unwrap();
+    game.add_player(3, 500).unwrap();
 
     // Hand continues normally — no extra DealHoleCards for player 3
     game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
@@ -100,7 +100,7 @@ fn test_add_player_during_game_gets_cards_next_hand() {
     game.player_action(a, PlayerAction::Fold).unwrap();
 
     // Add player 3 after hand 1
-    game.add_player(3).unwrap();
+    game.add_player(3, 500).unwrap();
 
     // Hand 2 — player 3 gets cards
     let cmds = game.start_hand().unwrap();
@@ -114,8 +114,8 @@ fn test_add_player_during_game_gets_cards_next_hand() {
 #[test]
 fn test_remove_player() {
     let mut game = Game::new(default_config());
-    game.add_player(1).unwrap();
-    game.add_player(2).unwrap();
+    game.add_player(1, 500).unwrap();
+    game.add_player(2, 500).unwrap();
     assert!(game.remove_player(1).is_ok());
     assert_eq!(game.all_players()[0].status, PlayerStatus::Out);
 }
@@ -138,14 +138,9 @@ fn test_sit_out_and_sit_in() {
 
 #[test]
 fn test_rebuy() {
-    let config = GameConfig {
-        starting_chips: 2000,
-        rebuy_amount: Some(3000),
-        ..default_config()
-    };
-    let mut game = Game::new(config);
-    game.add_player(1).unwrap();
-    game.add_player(2).unwrap();
+    let mut game = Game::new(default_config());
+    game.add_player(1, 2000).unwrap();
+    game.add_player(2, 2000).unwrap();
     let p = game.all_players().iter().find(|p| p.id == 1).unwrap();
     assert_eq!(p.chips, 2000);
     game.rebuy(1, 500).unwrap();
@@ -160,19 +155,15 @@ fn test_rebuy_disabled() {
         ..default_config()
     };
     let mut game = Game::new(config);
-    game.add_player(1).unwrap();
+    game.add_player(1, 500).unwrap();
     assert!(game.rebuy(1, 500).is_err());
 }
 
 #[test]
-fn test_rebuy_exceeds_max() {
-    let config = GameConfig {
-        rebuy_amount: Some(1200),
-        ..default_config()
-    };
-    let mut game = Game::new(config);
-    game.add_player(1).unwrap();
-    assert!(game.rebuy(1, 1500).is_err());
+fn test_rebuy_zero_amount() {
+    let mut game = Game::new(default_config());
+    game.add_player(1, 500).unwrap();
+    assert!(game.rebuy(1, 0).is_err());
 }
 
 // === Hand start tests ===
@@ -181,9 +172,9 @@ fn test_rebuy_exceeds_max() {
 fn test_can_start_hand() {
     let mut game = Game::new(default_config());
     assert!(!game.can_start_hand());
-    game.add_player(1).unwrap();
+    game.add_player(1, 500).unwrap();
     assert!(!game.can_start_hand());
-    game.add_player(2).unwrap();
+    game.add_player(2, 500).unwrap();
     assert!(game.can_start_hand());
 }
 
@@ -211,7 +202,7 @@ fn test_blinds_posted() {
 #[test]
 fn test_start_hand_not_enough_players() {
     let mut game = Game::new(default_config());
-    game.add_player(1).unwrap();
+    game.add_player(1, 500).unwrap();
     assert_eq!(game.start_hand(), Err(PokerError::CannotStartHand));
 }
 
@@ -646,16 +637,14 @@ fn test_config_custom() {
     let config = GameConfig {
         small_blind: 100,
         big_blind: 200,
-        starting_chips: 5000,
         max_players: 6,
         min_players: 3,
         allow_rebuy: false,
-        rebuy_amount: Some(3000),
     };
     let mut game = Game::new(config);
-    game.add_player(1).unwrap();
-    game.add_player(2).unwrap();
-    game.add_player(3).unwrap();
+    game.add_player(1, 5000).unwrap();
+    game.add_player(2, 5000).unwrap();
+    game.add_player(3, 5000).unwrap();
     assert_eq!(game.config().big_blind, 200);
     assert_eq!(game.config().max_players, 6);
 }
@@ -772,7 +761,7 @@ fn test_new_player_sb_in_heads_up() {
     assert_eq!(game.phase(), GamePhase::GameOver);
 
     // Add third player — n=2→3, new player gets SB
-    game.add_player(3).unwrap();
+    game.add_player(3, 500).unwrap();
 
     game.start_hand().unwrap();
 
@@ -803,7 +792,7 @@ fn test_new_player_bb_with_three_players() {
     assert_eq!(game.phase(), GamePhase::GameOver);
 
     // Add fourth player — n=3→4, new player gets BB
-    game.add_player(4).unwrap();
+    game.add_player(4, 500).unwrap();
 
     game.start_hand().unwrap();
 
@@ -823,7 +812,7 @@ fn test_normal_rotation_after_new_player() {
     game.player_action(active, PlayerAction::Fold).unwrap();
 
     // Add player 3 — gets SB
-    game.add_player(3).unwrap();
+    game.add_player(3, 500).unwrap();
 
     // Hand 2 — player 3 is SB
     game.start_hand().unwrap();
@@ -886,15 +875,13 @@ fn test_skip_busted_player_for_blinds() {
     let mut game = Game::new(GameConfig {
         small_blind: 50,
         big_blind: 100,
-        starting_chips: 100,
         max_players: 9,
         min_players: 2,
         allow_rebuy: false,
-        rebuy_amount: None,
     });
-    game.add_player(1).unwrap();
-    game.add_player(2).unwrap();
-    game.add_player(3).unwrap();
+    game.add_player(1, 100).unwrap();
+    game.add_player(2, 100).unwrap();
+    game.add_player(3, 100).unwrap();
 
     bust_player(&mut game, 3);
 
@@ -916,14 +903,12 @@ fn test_all_in_posting_when_chips_less_than_blind() {
     let mut game = Game::new(GameConfig {
         small_blind: 50,
         big_blind: 100,
-        starting_chips: 100,
         max_players: 9,
         min_players: 2,
         allow_rebuy: true,
-        rebuy_amount: Some(100),
     });
-    game.add_player(1).unwrap();
-    game.add_player(2).unwrap();
+    game.add_player(1, 100).unwrap();
+    game.add_player(2, 100).unwrap();
 
     bust_player(&mut game, 2);
 
@@ -944,15 +929,13 @@ fn test_two_eligible_three_total_blinds() {
     let mut game = Game::new(GameConfig {
         small_blind: 50,
         big_blind: 100,
-        starting_chips: 100,
         max_players: 9,
         min_players: 2,
         allow_rebuy: false,
-        rebuy_amount: None,
     });
-    game.add_player(1).unwrap();
-    game.add_player(2).unwrap();
-    game.add_player(3).unwrap();
+    game.add_player(1, 100).unwrap();
+    game.add_player(2, 100).unwrap();
+    game.add_player(3, 100).unwrap();
 
     bust_player(&mut game, 3);
 
@@ -975,15 +958,13 @@ fn test_heads_up_when_third_player_busted() {
     let mut game = Game::new(GameConfig {
         small_blind: 50,
         big_blind: 100,
-        starting_chips: 100,
         max_players: 9,
         min_players: 2,
         allow_rebuy: false,
-        rebuy_amount: None,
     });
-    game.add_player(1).unwrap();
-    game.add_player(2).unwrap();
-    game.add_player(3).unwrap();
+    game.add_player(1, 100).unwrap();
+    game.add_player(2, 100).unwrap();
+    game.add_player(3, 100).unwrap();
 
     bust_player(&mut game, 3);
 
@@ -1005,16 +986,14 @@ fn test_three_player_allin_different_stacks() {
     let config = GameConfig {
         small_blind: 50,
         big_blind: 100,
-        starting_chips: 1000,
         max_players: 9,
         min_players: 2,
         allow_rebuy: false,
-        rebuy_amount: None,
     };
     let mut game = Game::new(config);
-    game.add_player(1).unwrap();
-    game.add_player(2).unwrap();
-    game.add_player(3).unwrap();
+    game.add_player(1, 1000).unwrap();
+    game.add_player(2, 1000).unwrap();
+    game.add_player(3, 1000).unwrap();
 
     game.start_hand().unwrap();
     game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
@@ -1058,16 +1037,14 @@ fn test_three_player_allin_pot_total() {
     let config = GameConfig {
         small_blind: 50,
         big_blind: 100,
-        starting_chips: 1000,
         max_players: 9,
         min_players: 2,
         allow_rebuy: false,
-        rebuy_amount: None,
     };
     let mut game = Game::new(config);
-    game.add_player(1).unwrap();
-    game.add_player(2).unwrap();
-    game.add_player(3).unwrap();
+    game.add_player(1, 1000).unwrap();
+    game.add_player(2, 1000).unwrap();
+    game.add_player(3, 1000).unwrap();
 
     game.start_hand().unwrap();
     game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
@@ -1100,4 +1077,165 @@ fn test_three_player_allin_pot_total() {
     let p3 = game.all_players().iter().find(|p| p.id == 3).unwrap();
     assert_eq!(p1.chips, 0);
     assert_eq!(p3.chips, 0);
+}
+
+// === PlayerActions tests ===
+
+#[test]
+fn test_player_actions_preflop_sb() {
+    let mut game = setup_two_player_game();
+    game.start_hand().unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+
+    let active = game.active_player().unwrap();
+    let actions = game.player_actions(active).unwrap();
+
+    assert!(actions.can_fold);
+    assert!(!actions.can_check, "SB must call or raise pre-flop");
+    assert!(actions.can_call);
+    assert_eq!(actions.call_amount, 50); // SB posted 50, needs 50 more to match BB
+    assert!(actions.can_raise);
+    assert_eq!(actions.min_raise, 100);
+    assert_eq!(actions.max_raise, 900); // 950 chips left - 50 to call
+    assert!(actions.can_all_in);
+    assert_eq!(actions.all_in_amount, 950); // 1000 - 50 blind
+}
+
+#[test]
+fn test_player_actions_preflop_bb_can_check() {
+    let mut game = setup_two_player_game();
+    game.start_hand().unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+
+    // SB calls
+    let active = game.active_player().unwrap();
+    game.player_action(active, PlayerAction::Call).unwrap();
+
+    // BB's turn — can check
+    let bb = game.active_player().unwrap();
+    let actions = game.player_actions(bb).unwrap();
+
+    assert!(actions.can_check);
+    assert!(!actions.can_call);
+    assert!(actions.call_amount == 0);
+}
+
+#[test]
+fn test_player_actions_after_raise() {
+    let mut game = setup_two_player_game();
+    game.start_hand().unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+
+    // In heads-up: P1=dealer=BB, P2=SB. SB acts first.
+    // SB raises to 200 (Raise(100))
+    let sb = game.active_player().unwrap();
+    game.player_action(sb, PlayerAction::Raise(100)).unwrap();
+
+    // BB's turn — must call or re-raise
+    let bb = game.active_player().unwrap();
+    let actions = game.player_actions(bb).unwrap();
+
+    assert!(!actions.can_check);
+    assert!(actions.can_call);
+    assert_eq!(actions.call_amount, 100); // BB posted 100, needs 100 more to match 200
+    assert!(actions.can_raise);
+    assert_eq!(actions.min_raise, 100);
+    assert_eq!(actions.max_raise, 800); // 900 chips left - 100 to call
+}
+
+#[test]
+fn test_player_actions_call_not_enough_to_raise() {
+    let mut game = Game::new(GameConfig::default());
+    game.add_player(1, 10000).unwrap();
+    game.add_player(2, 150).unwrap(); // SB has 150
+    game.start_hand().unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+
+    // P2=SB posted 50, has 100 chips left, needs 50 to match BB
+    // Can call (50) but after that only 50 left — not enough to raise (min 100)
+    let sb = game.active_player().unwrap();
+    let actions = game.player_actions(sb).unwrap();
+
+    assert!(actions.can_call);
+    assert_eq!(actions.call_amount, 50);
+    assert!(!actions.can_raise, "50 left after call < min raise of 100");
+    assert_eq!(actions.max_raise, 50); // 100 chips - 50 to call
+    assert!(actions.can_all_in);
+    assert_eq!(actions.all_in_amount, 100); // 150 - 50 blind
+}
+
+#[test]
+fn test_player_actions_all_in_on_blind() {
+    let mut game = Game::new(GameConfig::default());
+    game.add_player(1, 50).unwrap(); // SB has exactly 50 — posts all-in on blind
+    game.add_player(2, 10000).unwrap();
+    game.start_hand().unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+
+    // SB is all-in from blind — cannot act further
+    let _sb = game.active_player().unwrap();
+    // SB went all-in posting the blind, so they can't act
+    let p1 = game.all_players().iter().find(|p| p.id == 1).unwrap();
+    assert!(p1.all_in);
+}
+
+#[test]
+fn test_player_actions_none_for_wrong_player() {
+    let mut game = setup_two_player_game();
+    game.start_hand().unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+
+    let active = game.active_player().unwrap();
+    let other = if active == 1 { 2 } else { 1 };
+    assert!(game.player_actions(other).is_none());
+}
+
+#[test]
+fn test_player_actions_none_when_not_started() {
+    let game = setup_two_player_game();
+    assert!(game.player_actions(1).is_none());
+}
+
+#[test]
+fn test_player_actions_none_when_all_in() {
+    let mut game = setup_two_player_game();
+    game.start_hand().unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+
+    // SB goes all-in
+    let sb = game.active_player().unwrap();
+    game.player_action(sb, PlayerAction::AllIn).unwrap();
+
+    // SB already acted and is all-in — actions should be None
+    assert!(game.player_actions(sb).is_none());
+}
+
+#[test]
+fn test_player_actions_check_available_postflop() {
+    let mut game = setup_two_player_game();
+    game.start_hand().unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
+    game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+
+    // Both call preflop
+    let a = game.active_player().unwrap();
+    game.player_action(a, PlayerAction::Call).unwrap();
+    let b = game.active_player().unwrap();
+    game.player_action(b, PlayerAction::Check).unwrap();
+
+    // Flop
+    game.handle_event(GameEvent::CommunityCardsRevealed).unwrap();
+
+    // Both can check
+    let a = game.active_player().unwrap();
+    let actions = game.player_actions(a).unwrap();
+    assert!(actions.can_check);
+    assert!(!actions.can_call);
 }
