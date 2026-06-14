@@ -1,7 +1,7 @@
 use crate::error::{PokerError, PlayerId};
 use crate::hand::HandScore;
 use crate::player::{PlayerState, PlayerStatus};
-use crate::command::{GameCommand, PlayerAction};
+use crate::command::{AvailableAction, GameCommand, GameResponse, PlayerAction};
 use crate::event::GameEvent;
 use crate::pot::Pot;
 
@@ -43,11 +43,9 @@ pub enum GamePhase {
 /// let config = GameConfig {
 ///     small_blind: 25,
 ///     big_blind: 50,
-///     starting_chips: 5000,
 ///     max_players: 6,
 ///     min_players: 2,
 ///     allow_rebuy: true,
-///     rebuy_amount: Some(5000),
 /// };
 /// assert_eq!(config.big_blind, 50);
 /// ```
@@ -57,16 +55,12 @@ pub struct GameConfig {
     pub small_blind: u64,
     /// Big blind amount.
     pub big_blind: u64,
-    /// Starting chips for each player.
-    pub starting_chips: u64,
     /// Maximum number of players at the table.
     pub max_players: usize,
     /// Minimum number of players to start a hand.
     pub min_players: usize,
     /// Whether rebuys are allowed.
     pub allow_rebuy: bool,
-    /// Maximum rebuy amount (None = starting_chips).
-    pub rebuy_amount: Option<u64>,
 }
 
 impl Default for GameConfig {
@@ -74,11 +68,9 @@ impl Default for GameConfig {
         Self {
             small_blind: 50,
             big_blind: 100,
-            starting_chips: 10000,
             max_players: 9,
             min_players: 2,
             allow_rebuy: true,
-            rebuy_amount: None,
         }
     }
 }
@@ -102,22 +94,26 @@ impl Default for GameConfig {
 /// # Examples
 ///
 /// ```rust
-/// use poker_engine::{Game, GameConfig, PlayerAction, GameEvent};
+/// use poker_engine::{Game, GameConfig, PlayerAction, GameEvent, GameResponse};
 ///
 /// let mut game = Game::new(GameConfig::default());
-/// game.add_player(1).unwrap();
-/// game.add_player(2).unwrap();
+/// game.add_player(1, 10000).unwrap();
+/// game.add_player(2, 10000).unwrap();
 ///
-/// // Start hand — get commands for dealer
-/// let cmds = game.start_hand().unwrap();
+/// // Start hand — deal cards
+/// let resp = game.start_hand().unwrap();
+/// match resp {
+///     GameResponse::DealerCommand(poker_engine::GameCommand::DealHoleCards { player_ids }) => {
+///         for id in player_ids {
+///             game.handle_event(GameEvent::HoleCardsDealt { player_id: id }).unwrap();
+///         }
+///     }
+///     _ => panic!("expected DealHoleCards"),
+/// }
 ///
-/// // Feed dealer results back
-/// game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
-/// game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
-///
-/// // Player actions
+/// // Player action
 /// let active = game.active_player().unwrap();
-/// game.player_action(active, PlayerAction::Call).unwrap();
+/// game.game_response(active, PlayerAction::Call).unwrap();
 /// ```
 #[derive(Debug, Clone)]
 pub struct Game {
@@ -163,7 +159,10 @@ impl Game {
         }
     }
 
-    /// Add a player to the table. Can only be done between hands.
+    /// Add a player to the table with the given chip stack.
+    ///
+    /// Can be called between hands or during an active game. When added mid-game,
+    /// the player sits at the table without cards and receives cards on the next deal.
     ///
     /// The new player is inserted at a position in the seat order so that:
     /// - With 2 players (heads-up → 3): new player gets small blind.
@@ -171,13 +170,9 @@ impl Game {
     ///
     /// # Errors
     ///
-    /// Returns [`PokerError::GameInProgress`] if a hand is in progress.
     /// Returns [`PokerError::PlayerAlreadyAtTable`] if the player is already seated.
     /// Returns [`PokerError::TableFull`] if the table is at capacity.
-    pub fn add_player(&mut self, player_id: PlayerId) -> Result<(), PokerError> {
-        if self.phase != GamePhase::WaitingToStart && self.phase != GamePhase::GameOver {
-            return Err(PokerError::GameInProgress);
-        }
+    pub fn add_player(&mut self, player_id: PlayerId, chips: u64) -> Result<(), PokerError> {
         if self.players.iter().any(|p| p.id == player_id) {
             return Err(PokerError::PlayerAlreadyAtTable(player_id));
         }
@@ -187,11 +182,19 @@ impl Game {
             });
         }
 
+        let in_progress = self.phase != GamePhase::WaitingToStart && self.phase != GamePhase::GameOver;
         let n = self.players.len();
-        let new_player = PlayerState::new(player_id, self.config.starting_chips);
+        let mut new_player = PlayerState::new(player_id, chips);
+        if in_progress {
+            new_player.status = PlayerStatus::SittingOut;
+            new_player.wants_in = true;
+        }
 
         if n < 2 {
             self.players.push(new_player);
+            if in_progress {
+                self.has_acted.push(false);
+            }
         } else {
             let d = self.dealer_index;
             let insert_at = if n == 2 {
@@ -203,6 +206,14 @@ impl Game {
             self.players.insert(insert_at, new_player);
             if insert_at <= d {
                 self.dealer_index += 1;
+            }
+            if in_progress {
+                self.has_acted.insert(insert_at, false);
+                if let Some(ai) = self.acting_index {
+                    if insert_at <= ai {
+                        self.acting_index = Some(ai + 1);
+                    }
+                }
             }
         }
 
@@ -263,8 +274,7 @@ impl Game {
             .find(|p| p.id == player_id)
             .ok_or(PokerError::PlayerNotFound(player_id))?;
 
-        let max_amount = self.config.rebuy_amount.unwrap_or(self.config.starting_chips);
-        if amount == 0 || player.chips + amount > max_amount {
+        if amount == 0 {
             return Err(PokerError::InvalidRebuy {
                 player: player_id,
                 amount,
@@ -288,15 +298,16 @@ impl Game {
         eligible >= self.config.min_players
     }
 
-    /// Start a new hand. Posts blinds, deals cards, and returns commands for the dealer.
+    /// Start a new hand. Posts blinds, deals cards, and returns a command for the dealer.
     ///
-    /// The returned [`GameCommand`] list tells the dealer which cards to deal.
+    /// The returned [`GameResponse::DealerCommand`] tells the dealer which players
+    /// to deal cards to, in dealing order.
     /// After dealing, feed the results back via [`handle_event`](Self::handle_event).
     ///
     /// # Errors
     ///
     /// Returns [`PokerError::CannotStartHand`] if not enough eligible players.
-    pub fn start_hand(&mut self) -> Result<Vec<GameCommand>, PokerError> {
+    pub fn start_hand(&mut self) -> Result<GameResponse, PokerError> {
         for player in &mut self.players {
             if player.status == PlayerStatus::SittingOut && player.wants_in {
                 player.status = PlayerStatus::Active;
@@ -366,15 +377,13 @@ impl Game {
 
         self.has_acted = vec![false; self.players.len()];
 
-        let mut commands = Vec::new();
-
-        for &idx in &eligible_indices {
-            if self.players[idx].status == PlayerStatus::Active && self.players[idx].chips > 0 {
-                commands.push(GameCommand::DealHoleCards {
-                    player_id: self.players[idx].id,
-                });
-            }
-        }
+        let deal_ids: Vec<PlayerId> = eligible_indices
+            .iter()
+            .filter(|&&idx| {
+                self.players[idx].status == PlayerStatus::Active && self.players[idx].chips > 0
+            })
+            .map(|&idx| self.players[idx].id)
+            .collect();
 
         let first_to_act = if eligible_indices.len() == 2 {
             sb_index
@@ -385,18 +394,19 @@ impl Game {
 
         self.acting_index = Some(first_to_act);
 
-        Ok(commands)
+        Ok(GameResponse::DealerCommand(GameCommand::DealHoleCards {
+            player_ids: deal_ids,
+        }))
     }
 
     /// Process a dealer event. Validates phase and updates game state.
     ///
-    /// - `HoleCardsDealt` — valid only during PreFlop.
-    /// - `CommunityCardsRevealed` — valid during Flop/Turn/River.
+    /// - `HoleCardsDealt` — valid only during PreFlop. Returns the first player's turn.
+    /// - `CommunityCardsRevealed` — valid during Flop/Turn/River. Returns either
+    ///   auto-advance commands or the next player's turn.
     /// - `PlayerCardsRevealed` — valid during Showdown. Collects scores and
     ///   determines the winner once all active players have been revealed.
-    ///
-    /// Returns additional commands if the engine needs more dealer actions.
-    pub fn handle_event(&mut self, event: GameEvent) -> Result<Vec<GameCommand>, PokerError> {
+    pub fn handle_event(&mut self, event: GameEvent) -> Result<GameResponse, PokerError> {
         match event {
             GameEvent::HoleCardsDealt { player_id } => {
                 if self.phase != GamePhase::PreFlop {
@@ -407,7 +417,7 @@ impl Game {
                 if !self.players.iter().any(|p| p.id == player_id) {
                     return Err(PokerError::PlayerNotFound(player_id));
                 }
-                Ok(Vec::new())
+                self.player_turn_response()
             }
             GameEvent::CommunityCardsRevealed => {
                 match self.phase {
@@ -424,7 +434,7 @@ impl Game {
                 if all_all_in {
                     self.advance_to_next_phase()
                 } else {
-                    Ok(Vec::new())
+                    self.player_turn_response()
                 }
             }
             GameEvent::PlayerCardsRevealed { player_id, score } => {
@@ -442,7 +452,7 @@ impl Game {
                 if self.pending_scores.len() >= active_count {
                     self.finish_showdown()
                 } else {
-                    Ok(Vec::new())
+                    Ok(GameResponse::GameOver)
                 }
             }
             GameEvent::Error(msg) => Err(PokerError::InvalidAction(msg)),
@@ -451,17 +461,18 @@ impl Game {
 
     /// Execute a player action (fold, check, call, raise, all-in).
     ///
-    /// Returns commands if the action triggers a phase transition (e.g., revealing community cards).
+    /// Returns either a command for the dealer (if the round ended and community
+    /// cards need to be revealed) or the next player's available actions.
     ///
     /// # Errors
     ///
     /// Returns [`PokerError::NotYourTurn`] if it is not this player's turn.
     /// Returns [`PokerError::PlayerIsAllIn`] if the player is all-in.
-    pub fn player_action(
+    pub fn game_response(
         &mut self,
         player_id: PlayerId,
         action: PlayerAction,
-    ) -> Result<Vec<GameCommand>, PokerError> {
+    ) -> Result<GameResponse, PokerError> {
         if self.phase == GamePhase::WaitingToStart || self.phase == GamePhase::GameOver {
             return Err(PokerError::GameNotInProgress);
         }
@@ -547,7 +558,7 @@ impl Game {
         self.advance_action()
     }
 
-    fn advance_action(&mut self) -> Result<Vec<GameCommand>, PokerError> {
+    fn advance_action(&mut self) -> Result<GameResponse, PokerError> {
         let eligible_indices: Vec<usize> = self
             .players
             .iter()
@@ -579,12 +590,12 @@ impl Game {
             }
             if can_act.contains(&next) {
                 self.acting_index = Some(next);
-                return Ok(Vec::new());
+                return self.player_turn_response();
             }
         }
 
         self.acting_index = Some(can_act[0]);
-        Ok(Vec::new())
+        self.player_turn_response()
     }
 
     fn all_acting_done(&self, can_act: &[usize]) -> bool {
@@ -601,7 +612,7 @@ impl Game {
         can_act.iter().all(|&i| self.players[i].bet == self.current_bet)
     }
 
-    fn advance_to_next_phase(&mut self) -> Result<Vec<GameCommand>, PokerError> {
+    fn advance_to_next_phase(&mut self) -> Result<GameResponse, PokerError> {
         let remaining: Vec<usize> = self
             .players
             .iter()
@@ -620,7 +631,7 @@ impl Game {
                 self.phase = GamePhase::Flop;
                 self.last_raiser_index = None;
                 self.acting_index = self.find_first_to_act_after_dealer();
-                Ok(vec![GameCommand::RevealCommunityCards { count: 3 }])
+                Ok(GameResponse::DealerCommand(GameCommand::RevealCommunityCards { count: 3 }))
             }
             GamePhase::Flop => {
                 self.community_count = 3;
@@ -628,7 +639,7 @@ impl Game {
                 self.phase = GamePhase::Turn;
                 self.last_raiser_index = None;
                 self.acting_index = self.find_first_to_act_after_dealer();
-                Ok(vec![GameCommand::RevealCommunityCards { count: 1 }])
+                Ok(GameResponse::DealerCommand(GameCommand::RevealCommunityCards { count: 1 }))
             }
             GamePhase::Turn => {
                 self.community_count = 4;
@@ -636,7 +647,7 @@ impl Game {
                 self.phase = GamePhase::River;
                 self.last_raiser_index = None;
                 self.acting_index = self.find_first_to_act_after_dealer();
-                Ok(vec![GameCommand::RevealCommunityCards { count: 1 }])
+                Ok(GameResponse::DealerCommand(GameCommand::RevealCommunityCards { count: 1 }))
             }
             GamePhase::River => {
                 self.community_count = 5;
@@ -656,16 +667,16 @@ impl Game {
                     return self.finish_single_winner();
                 }
 
-                Ok(vec![GameCommand::RevealPlayerCards {
+                Ok(GameResponse::DealerCommand(GameCommand::RevealPlayerCards {
                     player_ids: showdown_ids,
-                }])
+                }))
             }
             GamePhase::Showdown => self.finish_showdown(),
-            GamePhase::GameOver | GamePhase::WaitingToStart => Ok(Vec::new()),
+            GamePhase::GameOver | GamePhase::WaitingToStart => Ok(GameResponse::GameOver),
         }
     }
 
-    fn finish_single_winner(&mut self) -> Result<Vec<GameCommand>, PokerError> {
+    fn finish_single_winner(&mut self) -> Result<GameResponse, PokerError> {
         let winner = self
             .players
             .iter()
@@ -683,7 +694,7 @@ impl Game {
 
         self.pot = Pot::default();
         self.phase = GamePhase::GameOver;
-        Ok(Vec::new())
+        Ok(GameResponse::GameOver)
     }
 
     fn rotate_dealer(&mut self, eligible_indices: &[usize]) {
@@ -698,13 +709,13 @@ impl Game {
         }
     }
 
-    fn finish_showdown(&mut self) -> Result<Vec<GameCommand>, PokerError> {
+    fn finish_showdown(&mut self) -> Result<GameResponse, PokerError> {
         let scores = std::mem::take(&mut self.pending_scores);
 
         if scores.is_empty() {
             self.pot = Pot::default();
             self.phase = GamePhase::GameOver;
-            return Ok(Vec::new());
+            return Ok(GameResponse::GameOver);
         }
 
         let max_score = scores.iter().map(|&(_, s)| s).max().unwrap();
@@ -724,7 +735,7 @@ impl Game {
 
         self.pot = Pot::default();
         self.phase = GamePhase::GameOver;
-        Ok(Vec::new())
+        Ok(GameResponse::GameOver)
     }
 
     fn reset_bets_for_new_round(&mut self) {
@@ -765,6 +776,47 @@ impl Game {
     /// ID of the player who should act next, or None if no one is acting.
     pub fn active_player(&self) -> Option<PlayerId> {
         self.acting_index.map(|i| self.players[i].id)
+    }
+
+    /// Build a `PlayerTurn` response for the current acting player.
+    fn player_turn_response(&self) -> Result<GameResponse, PokerError> {
+        let acting = self.acting_index.ok_or(PokerError::InvalidAction(
+            "No player acting".to_string(),
+        ))?;
+        let player_id = self.players[acting].id;
+        let actions = self.available_actions(acting);
+        Ok(GameResponse::PlayerTurn { player_id, actions })
+    }
+
+    /// Compute the available actions for the player at the given index.
+    fn available_actions(&self, idx: usize) -> Vec<AvailableAction> {
+        let p = &self.players[idx];
+        let call_needed = self.current_bet.saturating_sub(p.bet);
+        let has_bet_to_match = call_needed > 0;
+        let min_raise = self.config.big_blind;
+        let _max_raise = p.chips.saturating_sub(call_needed);
+        let can_raise = p.chips >= call_needed + min_raise;
+
+        let mut actions = vec![AvailableAction::Fold];
+
+        if has_bet_to_match {
+            actions.push(AvailableAction::Call(call_needed.min(p.chips)));
+        } else {
+            actions.push(AvailableAction::Check);
+            if p.chips > 0 {
+                actions.push(AvailableAction::Bet(min_raise));
+            }
+        }
+
+        if can_raise {
+            actions.push(AvailableAction::Raise(min_raise));
+        }
+
+        if p.chips > 0 {
+            actions.push(AvailableAction::AllIn(p.chips));
+        }
+
+        actions
     }
 
     /// List of players still at the table (Active or SittingOut).

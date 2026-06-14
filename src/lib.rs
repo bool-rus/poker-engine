@@ -22,56 +22,54 @@
 //! ## Quick start
 //!
 //! ```rust
-//! use poker_engine::{Game, GameConfig, PlayerAction, GameCommand, GameEvent};
+//! use poker_engine::{Game, GameConfig, PlayerAction, GameCommand, GameEvent, GameResponse};
 //!
 //! let mut game = Game::new(GameConfig::default());
-//! game.add_player(1).unwrap();
-//! game.add_player(2).unwrap();
+//! game.add_player(1, 10000).unwrap();
+//! game.add_player(2, 10000).unwrap();
 //!
 //! // --- Pre-flop ---
-//! let cmds = game.start_hand().unwrap();
-//! // cmds: [DealHoleCards{1}, DealHoleCards{2}]
-//!
-//! game.handle_event(GameEvent::HoleCardsDealt { player_id: 1 }).unwrap();
-//! game.handle_event(GameEvent::HoleCardsDealt { player_id: 2 }).unwrap();
+//! let resp = game.start_hand().unwrap();
+//! if let GameResponse::DealerCommand(GameCommand::DealHoleCards { player_ids }) = resp {
+//!     for id in player_ids {
+//!         game.handle_event(GameEvent::HoleCardsDealt { player_id: id }).unwrap();
+//!     }
+//! }
 //!
 //! let active = game.active_player().unwrap();
 //! let other = if active == 1 { 2 } else { 1 };
-//! game.player_action(active, PlayerAction::Call).unwrap();
-//! game.player_action(other, PlayerAction::Check).unwrap();
+//! game.game_response(active, PlayerAction::Call).unwrap();
+//! game.game_response(other, PlayerAction::Check).unwrap();
 //! assert_eq!(game.phase(), poker_engine::GamePhase::Flop);
 //!
 //! // --- Flop ---
-//! // Engine requests RevealCommunityCards{count: 3}
 //! game.handle_event(GameEvent::CommunityCardsRevealed).unwrap();
 //!
 //! let a = game.active_player().unwrap();
 //! let o = if a == 1 { 2 } else { 1 };
-//! game.player_action(a, PlayerAction::Check).unwrap();
-//! game.player_action(o, PlayerAction::Check).unwrap();
+//! game.game_response(a, PlayerAction::Check).unwrap();
+//! game.game_response(o, PlayerAction::Check).unwrap();
 //! assert_eq!(game.phase(), poker_engine::GamePhase::Turn);
 //!
 //! // --- Turn ---
 //! game.handle_event(GameEvent::CommunityCardsRevealed).unwrap();
 //! let a = game.active_player().unwrap();
 //! let o = if a == 1 { 2 } else { 1 };
-//! game.player_action(a, PlayerAction::Check).unwrap();
-//! game.player_action(o, PlayerAction::Check).unwrap();
+//! game.game_response(a, PlayerAction::Check).unwrap();
+//! game.game_response(o, PlayerAction::Check).unwrap();
 //! assert_eq!(game.phase(), poker_engine::GamePhase::River);
 //!
 //! // --- River ---
 //! game.handle_event(GameEvent::CommunityCardsRevealed).unwrap();
 //! let a = game.active_player().unwrap();
 //! let o = if a == 1 { 2 } else { 1 };
-//! game.player_action(a, PlayerAction::Check).unwrap();
-//! game.player_action(o, PlayerAction::Check).unwrap();
+//! game.game_response(a, PlayerAction::Check).unwrap();
+//! game.game_response(o, PlayerAction::Check).unwrap();
 //! assert_eq!(game.phase(), poker_engine::GamePhase::Showdown);
 //!
 //! // --- Showdown ---
-//! // Dealer evaluates hands and sends scores
 //! game.handle_event(GameEvent::PlayerCardsRevealed { player_id: 1, score: 500 }).unwrap();
 //! game.handle_event(GameEvent::PlayerCardsRevealed { player_id: 2, score: 800 }).unwrap();
-//! // Hand complete — player 2 wins
 //! assert_eq!(game.phase(), poker_engine::GamePhase::GameOver);
 //! ```
 
@@ -86,7 +84,7 @@ pub mod game;
 pub use error::{PokerError, PlayerId};
 pub use hand::HandScore;
 pub use player::{PlayerState, PlayerStatus};
-pub use command::{GameCommand, PlayerAction};
+pub use command::{AvailableAction, GameCommand, GameResponse, PlayerAction};
 pub use event::GameEvent;
 pub use pot::Pot;
 pub use game::{Game, GameConfig, GamePhase};

@@ -12,9 +12,9 @@ pub type PlayerId = u64;
 ///
 /// let config = GameConfig { max_players: 2, ..GameConfig::default() };
 /// let mut game = Game::new(config);
-/// game.add_player(1).unwrap();
-/// game.add_player(2).unwrap();
-/// assert_eq!(game.add_player(3), Err(PokerError::TableFull { max: 2 }));
+/// game.add_player(1, 10000).unwrap();
+/// game.add_player(2, 10000).unwrap();
+/// assert_eq!(game.add_player(3, 10000), Err(PokerError::TableFull { max: 2 }));
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PokerError {
